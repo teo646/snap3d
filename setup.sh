@@ -31,7 +31,7 @@ fi
 in_env "$MAIN_ENV" pip install -e ".[all]"
 
 say "2/4 submodules and patches"
-git submodule update --init third_party/FastGS third_party/Metric3D
+git submodule update --init third_party/FastGS
 ./third_party/patches/apply.sh || die "patches did not apply cleanly (see apply.sh --check)"
 
 if [ "$SKIP_FASTGS" = 1 ]; then

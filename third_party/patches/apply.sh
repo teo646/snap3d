@@ -19,7 +19,6 @@ MODE="${1:-apply}"
 
 # name:base-commit - the upstream revision each patch was generated against.
 MODULES=(
-  "Metric3D:eb5b6fac0dc155e4e52f576e304fbf11655ff339"
   "FastGS:f6210e44dbb104b2e88259f3767ac95ffe0e0057"
 )
 

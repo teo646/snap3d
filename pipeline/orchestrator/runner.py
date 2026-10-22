@@ -17,11 +17,6 @@ contains, so it is a CLI argument rather than a YAML param. It is the `text_prom
 every masking stage that does not set its own (a pipeline may segment several times).
 A masking stage with neither is skipped, for a capture with no background to strip.
 
-`--lambda-depth-prior` is the other run-level argument: the weight of the monocular depth
-prior, injected into the `geometry_prior` stage (which only does anything when it is
-positive) and into `surface_recon` (which only computes the loss term when it is). Left out,
-each stage uses its own `lambda_depth_prior` param, and a stage without one defaults to 0 -
-no prior, no Metric3D inference, no extra loss term.
 """
 
 from __future__ import annotations
@@ -42,20 +37,6 @@ from pipeline.stages._common import compute_input_hashes
 # the module docstring).
 _MASKING_MODULES = ("pipeline.stages.masking.run",)
 
-# Stages that take the run's depth prior weight (see the module docstring).
-_DEPTH_PRIOR_MODULES = (
-    "pipeline.stages.geometry_prior.run",
-    "pipeline.stages.surface_recon_fastpgsr.run",
-)
-
-
-def _with_cli_params(module: str, params: dict, lambda_depth_prior: float | None) -> dict:
-    """`params` with the run-level CLI values that apply to `module` laid over them. The
-    CLI wins over the YAML, as `--text` does for the masking stages."""
-    if lambda_depth_prior is not None and module in _DEPTH_PRIOR_MODULES:
-        return {**params, "lambda_depth_prior": lambda_depth_prior}
-    return params
-
 
 def run_pipeline(
     config_path: Path,
@@ -65,7 +46,6 @@ def run_pipeline(
     force: bool,
     until_stage: str | None,
     text_prompt: str | None = None,
-    lambda_depth_prior: float | None = None,
 ) -> Path:
     start_time = time.time()
     config = yaml.safe_load(config_path.read_text())
@@ -81,7 +61,7 @@ def run_pipeline(
     for i, stage_cfg in enumerate(stages):
         stage_id = stage_cfg["id"]
         stage_dir = run_dir / f"{i + 1:02d}_{stage_id}"
-        params = _with_cli_params(stage_cfg["module"], stage_cfg.get("params", {}), lambda_depth_prior)
+        params = stage_cfg.get("params", {})
         if stage_cfg["module"] in _MASKING_MODULES:
             # SAM3 needs a text prompt to segment anything, and there is no sensible
             # default for "what is the object in this capture". No --text therefore
@@ -144,15 +124,7 @@ def main() -> None:
         help="object to segment, e.g. --text apple (the text_prompt of every masking stage that sets none). "
         "Omit it to skip masking entirely - for a capture with no background to strip.",
     )
-    parser.add_argument(
-        "--lambda-depth-prior", type=float, default=None, metavar="W",
-        help="weight of the monocular depth prior. W > 0 runs the geometry_prior stage and adds the term "
-        "to surface_recon's loss; 0 (the default when this is omitted and the config sets nothing) runs "
-        "neither. Overrides params.lambda_depth_prior on those stages.",
-    )
     args = parser.parse_args()
-    if args.lambda_depth_prior is not None and args.lambda_depth_prior < 0:
-        parser.error("--lambda-depth-prior must be >= 0")
 
     if not args.input.exists():
         print(f"Input path does not exist: {args.input}", file=sys.stderr)
@@ -165,7 +137,6 @@ def main() -> None:
         force=args.force,
         until_stage=args.until,
         text_prompt=args.text,
-        lambda_depth_prior=args.lambda_depth_prior,
     )
 
 

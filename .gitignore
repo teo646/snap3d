@@ -226,10 +226,6 @@ __marimo__/
 !/checkpoints/.gitkeep
 
 
-# Metric3D's torch.hub checkpoint cache lives in ~/.cache/torch, but hub writes a
-# marker here when loading from a local source.
-/third_party/Metric3D/**/__pycache__/
-
 # Per-machine Claude Code settings
 .claude/
 

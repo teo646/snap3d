@@ -63,32 +63,6 @@ from pipeline.schemas.mesh import Mesh
 from pipeline.stages._common import finalize_stage, stage_cli
 
 
-def _depth_prior_dir(geometry_prior: Path | None, lambda_depth_prior: float) -> Path | None:
-    """Where training reads the monocular depth priors from, or None when it should not.
-
-    With `lambda_depth_prior` at 0 the term is skipped, so the `geometry_prior` input -
-    present in every pipeline that can use it, and empty unless it was switched on - is
-    not looked at at all. With it positive the priors must exist: a weight asking for a
-    prior that is not there is refused here, where the cause is obvious, rather than
-    surfacing as a training run that quietly applies nothing.
-    """
-    if lambda_depth_prior <= 0.0:
-        return None
-    if geometry_prior is None:
-        raise RuntimeError(
-            f"lambda_depth_prior={lambda_depth_prior} needs per-view priors - give this stage a "
-            "`geometry_prior` input."
-        )
-    priors = geometry_prior / "priors"
-    if not any(priors.glob("*.pth")):
-        raise RuntimeError(
-            f"lambda_depth_prior={lambda_depth_prior} but {priors} holds no priors: the geometry_prior "
-            "stage ran with lambda_depth_prior 0. Give both stages the same weight (the runner's "
-            "--lambda-depth-prior does)."
-        )
-    return priors
-
-
 def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -> StageManifest:
     t0 = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -112,11 +86,9 @@ def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -
     build_masked_render_dataset(dense_dir, masks_dir, masked_render_dataset_dir, config.mask_dilation_px)
     nest_sparse_model(masked_render_dataset_dir)
 
-    prior_dir = _depth_prior_dir(input_dirs.get("geometry_prior"), config.lambda_depth_prior)
-
     mesh_path = run_fastpgsr_surface_recon(
         dataset_dir, output_dir / "_fastpgsr_run", config,
-        render_dataset_dir=masked_render_dataset_dir, prior_dir=prior_dir,
+        render_dataset_dir=masked_render_dataset_dir,
     )
     Mesh.load(mesh_path).save(output_dir / "mesh_highpoly.obj")
 

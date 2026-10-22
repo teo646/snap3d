@@ -67,19 +67,6 @@ class FastPGSRConfig:
     # anything when the training images carry an alpha channel, i.e. under
     # surface_recon_fastpgsr. 0 is upstream's behaviour.
     lambda_mask_alpha: float = 0.0
-    # Monocular depth prior, masked to the object (see the FastGS patch's
-    # utils/loss_utils.depth_prior_loss). Needs `prior_dir` passed to
-    # run_fastpgsr_surface_recon - the stage wires that from a geometry_prior input. 0
-    # disables the term, which is upstream's behaviour.
-    lambda_depth_prior: float = 0.0
-    depth_prior_until_iter: int = 15000
-    # Nonzero: the depth prior's weight follows how little the render can be trusted at each
-    # pixel (FastGS's `depth_prior_render_conf`; 1 = alpha x normal agreement, 2 = multi-view
-    # geometric consistency); 0: one flat weight, `lambda_depth_prior`.
-    depth_prior_render_conf: int = 2
-    # With `depth_prior_render_conf` 2: how many neighbouring views each view's depth is
-    # checked against.
-    depth_prior_geo_neighbors: int = 2
     # Where FastGS keeps every training view's image, gray copy and mask. "cuda" holds them
     # all in GPU memory, 5 float32 channels a pixel: about 60 MB a view at 3 MP, so ~7.4 GB
     # for 124 views (measured on statue_all) - most of a 16 GB card, before training has
@@ -122,7 +109,6 @@ def run_fastpgsr_surface_recon(
     output_dir: Path,
     config: FastPGSRConfig | None = None,
     render_dataset_dir: Path | None = None,
-    prior_dir: Path | None = None,
 ) -> Path:
     """`dataset_dir` must hold flat `images/` + `sparse/0/{cameras,images,points3D}.bin`.
     Note the `0/`: despite deriving from PGSR, Fast-PGSR's reader is vanilla 3DGS's and
@@ -157,12 +143,7 @@ def run_fastpgsr_surface_recon(
         "--mult", str(config.mult),
         "--multi_view_weight_until_iter", str(config.multi_view_weight_until_iter),
         "--lambda_mask_alpha", str(config.lambda_mask_alpha),
-        "--lambda_depth_prior", str(config.lambda_depth_prior),
-        "--depth_prior_until_iter", str(config.depth_prior_until_iter),
-        "--depth_prior_render_conf", str(config.depth_prior_render_conf),
-        "--depth_prior_geo_neighbors", str(config.depth_prior_geo_neighbors),
         "--data_device", config.data_device,
-        *(["--prior_path", str(prior_dir.resolve())] if prior_dir else []),
         *(["--exposure_compensation"] if config.exposure_compensation else []),
         *config.extra_train_args,
     ]

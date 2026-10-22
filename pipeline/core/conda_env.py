@@ -1,4 +1,4 @@
-"""Where the separate conda environments the pipeline shells out to (fastgs, da3, shiq, mpface) live."""
+"""Where the separate conda environments the pipeline shells out to (fastgs, mpface) live."""
 
 from __future__ import annotations
 

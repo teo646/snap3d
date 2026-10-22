@@ -3,7 +3,7 @@
 #
 #   conda env create -f environment.yml
 #   conda activate snap3d
-#   pip install -e ".[all]"        # the pipeline + SAM3, Metric3D's deps and the viewers' pygame
+#   pip install -e ".[all]"        # the pipeline + SAM3 and the viewers' pygame
 #
 # Why the exact build strings: conda-forge's `colmap` package doesn't declare
 # `libfaiss`/`openimageio` as hard runtime dependencies even though the binary
