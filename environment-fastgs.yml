@@ -1,0 +1,24 @@
+# Conda env for Fast-PGSR (third_party/FastGS), the surface reconstruction stage. It is separate
+# from `sh-texture` because FastGS compiles its own CUDA extensions against torch 2.11 / CUDA 12.8,
+# while `sh-texture` runs a newer torch.
+#
+# setup.sh creates this env and then builds the four extensions; to do it by hand see README.md.
+name: fastgs
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.11.0
+      - torchvision==0.26.0
+      - numpy
+      - scipy
+      - pillow
+      - tqdm
+      - plyfile
+      - opencv-python-headless
+      - trimesh
+      - open3d
+      - lpips
