@@ -1,14 +1,7 @@
-"""Per-view depth maps rendered from a trained Fast-PGSR model, at the posed cameras'
-own resolution: the reference slf's depth test compares each observation against.
-
-Why the Gaussians rather than the fused mesh: the mesh is those same depth maps
-averaged into 2 mm TSDF voxels, which erases anything thinner - suede fibres, a thin
-rim's edge. In a photo those still occlude what is behind them, so a pixel showing a
-fibre over the boot's lining depth-tests as "lining" against the mesh and passes. The
-Gaussians keep them.
-
-The renderer lives in the `fastgs` env, so this writes the cameras to JSON and runs
-_fastgs_depth_worker.py there.
+"""Per-view depth maps rendered from a trained Fast-PGSR model at the posed cameras' resolution:
+the reference slf's depth test compares each observation against. Unlike the fused mesh, the
+Gaussians keep thin structures. The renderer lives in the `fastgs` env, so this writes the
+cameras to JSON and runs _fastgs_depth_worker.py there.
 """
 
 from __future__ import annotations
@@ -25,9 +18,7 @@ __all__ = ["find_fastpgsr_checkpoint", "find_model_dir", "render_gaussian_depths
 
 
 def find_model_dir(recon_dir: Path) -> Path:
-    """The trained-model directory inside a surface_recon stage's output.
-
-    Its name ends in `_run` (`_fastpgsr_run` for the Fast-PGSR path); slf takes whichever is there."""
+    """The trained-model directory inside a surface_recon stage's output (its name ends in `_run`)."""
     candidates = [d for d in sorted(recon_dir.glob("*_run")) if (d / "point_cloud").is_dir()]
     if not candidates:
         raise FileNotFoundError(
@@ -61,8 +52,8 @@ def render_gaussian_depths(
     mult: float,
     python_bin: str = FastPGSRConfig.python_bin,
 ) -> Path:
-    """Writes `<out_dir>/<image stem>.npy` (float32 camera-space z, 0 where nothing
-    was rendered) for every posed image; returns `out_dir`."""
+    """Writes `<out_dir>/<image stem>.npy` (float32 camera-space z, 0 where nothing rendered)
+    for every posed image; returns `out_dir`."""
     ply, sh_degree = find_fastpgsr_checkpoint(model_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cameras = []

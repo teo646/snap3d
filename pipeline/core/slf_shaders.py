@@ -1,9 +1,5 @@
-"""GLSL shader source shared between SLF training's GPU parallax-resolve pass
-(camera_raster.py, called from slf_fit.py's per-photo loop) and the interactive SLF
-viewer (viewes/view_slf.py) - so the exact procedure that decided which uv a photo
-pixel's observation was fit against, and the exact procedure the viewer resolves at
-render time, are one literal shared GLSL source rather than two independently-
-maintained ports of the same math.
+"""GLSL shader source shared between SLF training's parallax-resolve pass (camera_raster.py) and
+the interactive viewers, so both resolve the same uv from one source.
 """
 
 from __future__ import annotations

@@ -1,12 +1,7 @@
 """Ingest stage wrapper: raw source -> posed_images + sparse_points.
 
-Dispatches on `params["mode"]` to the matching core implementation. This is the
-only stage that knows the ingest paths differ - everything after it consumes the
-posed_images schema and nothing else.
-
-An optional `feature_masks` input (photo mode only) is a `masking` stage's output, whose
-`masks/` is COLMAP's `--ImageReader.mask_path`, restricting SfM to the pixels those masks
-keep. No shipped config wires it.
+An optional `feature_masks` input is a `masking` stage's output, whose `masks/` is COLMAP's
+`--ImageReader.mask_path`, restricting SfM to the pixels those masks keep.
 """
 
 from __future__ import annotations
@@ -45,8 +40,7 @@ def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -
     sparse_points.save(output_dir / "sparse_points.ply")
 
     outputs = {"cameras": "cameras.json", "images": "images", "sparse_points": "sparse_points.ply"}
-    # Recorded, not consumed (mean_up_vector is derived on demand): having the axis in
-    # the manifest makes a capture whose ups cancel out noticeable early.
+    # Recorded, not consumed: it makes a capture whose ups cancel out noticeable early.
     up = posed_images.mean_up_vector(output_dir)
     return finalize_stage(
         "ingest",

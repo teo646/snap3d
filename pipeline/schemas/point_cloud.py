@@ -15,11 +15,8 @@ class PointCloud:
     points: np.ndarray  # (N, 3) float64
     colors: np.ndarray | None = None  # (N, 3) float in [0, 1]
     normals: np.ndarray | None = None  # (N, 3)
-    # Per-point observation info: for point i, `track_image_ids[i]` is the list of
-    # PosedImage.image_id values that observe it, and `track_pixels[i]` the matching
-    # (x, y) pixel coordinates in those images. Populated by SfM/MVS when available;
-    # consumed by masking_sam3 to decide keep/drop per point via multi-view voting,
-    # and by slf_fit to know which views to sample per point/texel.
+    # Per-point observations: `track_image_ids[i]` lists the PosedImage.image_id values that observe
+    # point i, `track_pixels[i]` the matching (x, y) pixels.
     track_image_ids: list[list[int]] | None = field(default=None)
     track_pixels: list[list[tuple[float, float]]] | None = field(default=None)
 
@@ -27,8 +24,7 @@ class PointCloud:
         return len(self.points)
 
     def to_open3d(self) -> o3d.geometry.PointCloud:
-        # np.array(..., copy=True): guards against read-only arrays (e.g. handed in
-        # directly from trimesh, which sometimes returns cached read-only arrays).
+        # copy=True guards against read-only arrays (e.g. from trimesh).
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(np.array(self.points, dtype=np.float64, copy=True))
         if self.colors is not None:
@@ -53,11 +49,7 @@ class PointCloud:
         )
 
     def save(self, path: str | Path) -> None:
-        """Writes a .ply next to a `<stem>.tracks.json` sidecar (if tracks are present).
-
-        Point order in the .ply is preserved (open3d does not reorder), so the
-        sidecar array indices line up with .ply vertex indices.
-        """
+        """Writes a .ply next to a `<stem>.tracks.json` sidecar (if tracks are present); point order is preserved."""
         path = Path(path)
         o3d.io.write_point_cloud(str(path), self.to_open3d())
         if self.track_image_ids is not None:

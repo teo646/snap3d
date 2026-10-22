@@ -1,15 +1,7 @@
-"""Real spherical-harmonics basis + CG bilinear-texel reconstruction.
+"""Real spherical-harmonics basis + CG bilinear-texel reconstruction (see slf_fit.py).
 
-Ported from teo646/surface-light-fields-for-planar-paintings @ 53f5787 (model.py's
-`_sh_basis`, util.py's `bilinear_neighbors`/`cg_solve_bilinear_texels`) - the numerical
-core of that commit's stabilized POM-based fit. See slf_fit.py for how they compose.
-
-`hsh_remap` is the reference's hemisphere-to-sphere remap. `view_local` is already
-relative to the texel's own normal, so remapping onto the full sphere before fitting
-lets a low degree (1 by default) capture more single-sided detail per coefficient. It
-clamps z just below zero to the hemisphere boundary rather than discarding it: with a
-baked, decimated normal and a capture that circles the object, grazing observations
-land there without being real cross-hemisphere ones.
+`hsh_remap` remaps the texel-local hemisphere of view directions onto the full sphere, so a low
+degree captures more single-sided detail; z just below zero is clamped to the boundary.
 """
 
 from __future__ import annotations
@@ -61,9 +53,8 @@ def sh_basis(degree: int, dirs: torch.Tensor) -> torch.Tensor:
 
 
 def hsh_remap(dirs: torch.Tensor) -> torch.Tensor:
-    """(B, 3) unit vectors relative to the normal (z = normal) -> (B, 3) on the full
-    sphere: z clamped to [0, 1], then `d' = (2xz, 2yz, 2z^2-1)`, which is
-    unit-preserving. Feed the result to `sh_basis`, not `dirs`."""
+    """(B, 3) unit vectors relative to the normal (z = normal) -> (B, 3) on the full sphere:
+    z clamped to [0, 1], then `d' = (2xz, 2yz, 2z^2-1)`. Feed the result to `sh_basis`."""
     x, y = dirs[:, 0], dirs[:, 1]
     z = dirs[:, 2].clamp(0.0, 1.0)
     return torch.stack([2 * x * z, 2 * y * z, 2 * z * z - 1], dim=-1)
@@ -72,10 +63,8 @@ def hsh_remap(dirs: torch.Tensor) -> torch.Tensor:
 def bilinear_neighbors(
     x: torch.Tensor, y: torch.Tensor, width: int, height: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Continuous atlas coordinates (x, y) - uv_geometry.uv_to_atlas_xy's output, NOT
-    normalized uv - to the 4 neighbour texel indices and bilinear weights. Same
-    convention as sample_bilinear/rasterize_uv_atlas, since this decides which texels a
-    photo pixel scatters onto during CG."""
+    """Continuous atlas coordinates (x, y) (uv_geometry.uv_to_atlas_xy's output, not normalized
+    uv) -> the 4 neighbour texel indices and bilinear weights."""
     x0f = torch.floor(x)
     y0f = torch.floor(y)
     fx = x - x0f
@@ -93,23 +82,19 @@ RECON_CG_TOL: float = 1e-5
 
 
 def cg_solve_bilinear_texels(
-    idx: torch.Tensor,  # (N, 4) int64 - flat texel index of the 4 bilinear neighbors per observation
-    wts: torch.Tensor,  # (N, 4) float32 - bilinear weights for those 4 texels (rows sum to 1)
-    b: torch.Tensor,  # (N, C) float32 - observed pixel color per observation
+    idx: torch.Tensor,  # (N, 4) int64 - flat texel indices of the 4 bilinear neighbors
+    wts: torch.Tensor,  # (N, 4) float32 - bilinear weights (rows sum to 1)
+    b: torch.Tensor,  # (N, C) float32 - observed pixel color
     P: int,  # number of texels (unknowns)
     ridge: float = RECON_RIDGE,
     iters: int = RECON_CG_ITERS,
     tol: float = RECON_CG_TOL,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Solves (B^T B + ridge*I) u = B^T b by matrix-free CG, where B[n, p] is the
-    bilinear weight observation n gives texel p. Recovers the texel values that, when
-    bilinearly re-sampled at each observation's coordinate, best reproduce every
-    observed pixel - so a texel many photo pixels partially cover is one shared
-    unknown rather than each pixel snapping to its nearest texel.
+    """Solves (B^T B + ridge*I) u = B^T b by matrix-free CG, where B[n, p] is the bilinear weight
+    observation n gives texel p.
 
-    Returns (u (P, C), precision (P,) = (B^T B)_pp), the latter an inverse-variance
-    confidence used to discard barely-observed texels and to weight this photo in the
-    SH regression.
+    Returns (u (P, C), precision (P,) = (B^T B)_pp), the latter used to discard barely-observed
+    texels and to weight this photo in the SH regression.
     """
 
     def apply_B(v: torch.Tensor) -> torch.Tensor:

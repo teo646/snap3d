@@ -1,13 +1,10 @@
 """``posed_images`` schema: the contract between ingest and everything downstream.
 
-Any ingest implementation only has to produce a directory containing::
-
     <stage_dir>/images/<file_name>   # the (possibly undistorted) source frames
     <stage_dir>/cameras.json         # a serialized PosedImageSet
 
-Poses are COLMAP world-to-camera: ``X_cam = R(q) @ X_world + t``, camera looking down
-+Z with +Y down, same as COLMAP's own images.txt/images.bin. Those poses describe the
-image *as stored*, which is not always the image as shot - see `exif_up_orientation`.
+Poses are COLMAP world-to-camera: ``X_cam = R(q) @ X_world + t``, camera looking down +Z with +Y
+down, describing the image as stored (see `exif_up_orientation`).
 """
 
 from __future__ import annotations
@@ -20,28 +17,22 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
-# Below this, the mean of the per-camera up vectors has cancelled itself out and its
-# direction carries no information - see PosedImageSet.mean_up_vector.
+# Below this, the mean of the per-camera up vectors carries no direction (see mean_up_vector).
 _UP_MEAN_MIN_NORM = 1e-3
 
-# EXIF orientation -> (row of R, sign) giving the world direction that is "up" in the
-# *displayed* photo. A phone shot in portrait stores a landscape buffer plus an
-# orientation tag; COLMAP poses the stored buffer, so for those the up axis is a row of
-# R the untagged case never touches. Derived by composing each tag's transform:
-#   1,2 (no rotation)      display up = -y_buffer = -R[1]   (the plain case)
-#   3,4 (180 / flip)       display up = +y_buffer = +R[1]
-#   5,6 (90 CW)            display up = -x_buffer = -R[0]
-#   7,8 (270 CW)           display up = +x_buffer = +R[0]
-# Mirroring never moves the up axis, only the handedness, which an up vector ignores.
+# EXIF orientation -> (row of R, sign) giving the world direction that is "up" in the displayed
+# photo:
+#   1,2 (no rotation)      display up = -R[1]
+#   3,4 (180 / flip)       display up = +R[1]
+#   5,6 (90 CW)            display up = -R[0]
+#   7,8 (270 CW)           display up = +R[0]
 _EXIF_UP_AXIS = {1: (1, -1), 2: (1, -1), 3: (1, 1), 4: (1, 1),
                  5: (0, -1), 6: (0, -1), 7: (0, 1), 8: (0, 1)}
 _EXIF_ORIENTATION_TAG = 0x0112
 
 
 def exif_up_orientation(path: str | Path) -> int:
-    """This image's EXIF orientation tag, or 1 ("as stored") when it has none or cannot
-    be read. Only the tag is read - the pixels are never rotated, because COLMAP solved
-    its poses against the stored buffer and re-encoding would invalidate them."""
+    """This image's EXIF orientation tag, or 1 when it has none or cannot be read. Pixels are never rotated."""
     try:
         with Image.open(path) as img:
             value = img.getexif().get(_EXIF_ORIENTATION_TAG)
@@ -59,7 +50,7 @@ class CameraIntrinsics(BaseModel):
     model: CameraModel
     width: int
     height: int
-    params: list[float]  # semantics depend on `model`, matches COLMAP's convention
+    params: list[float]  # COLMAP's convention for `model`
 
     def as_matrix(self) -> np.ndarray:
         """3x3 intrinsic matrix K, valid for PINHOLE-family models (fx, fy, cx, cy, ...)."""
@@ -111,11 +102,8 @@ class CameraPose(BaseModel):
         return -R.T @ t
 
     def up_vector(self, exif_orientation: int = 1) -> np.ndarray:
-        """This camera's up as a unit vector in *world* space. COLMAP's +Y is **down**,
-        so for an untagged image the up axis is -Y_cam, which through X_world = R^T
-        X_cam is the negated second row of R. `exif_orientation` is the photo's EXIF
-        tag: a rotated one was shot with a different edge of the sensor pointing up, so
-        the up axis moves to another row of R (see _EXIF_UP_AXIS)."""
+        """This camera's up as a unit vector in world space: the negated second row of R for an
+        untagged image; `exif_orientation` moves it to another row (see _EXIF_UP_AXIS)."""
         row, sign = _EXIF_UP_AXIS.get(exif_orientation, (1, -1))
         return sign * self.rotation_matrix()[row, :]
 
@@ -147,20 +135,11 @@ class PosedImageSet(BaseModel):
         return Path(stage_dir) / self.images_dir / image.file_name
 
     def mean_up_vector(self, stage_dir: str | Path | None = None) -> np.ndarray:
-        """The capture's world up: the normalized mean of every camera's own up vector.
-        Derived on demand, so it stays correct if poses are rewritten. This is the
-        scene-global "up" a reconstruction's world frame does not record; the viewers
-        orbit about it.
+        """The capture's world up: the normalized mean of every camera's up vector.
 
-        Pass the ingest `stage_dir` (the one `image_path` takes) whenever the frames are
-        on disk: each image's EXIF orientation is then read and its up axis corrected.
-        Without it every photo is assumed stored as shot, which silently rotates the
-        result by 90 degrees for a portrait phone capture.
-
-        A capture whose cameras roll all the way around their view axis cancels the
-        mean out and leaves its direction as noise. Below `_UP_MEAN_MIN_NORM` this
-        falls back to the dominant axis of the up vectors (top eigenvector of
-        sum(u u^T)), whose sign - being sign-free - is fixed by convention.
+        Pass the ingest `stage_dir` when frames are on disk so each image's EXIF orientation is
+        applied; without it every photo is assumed stored as shot. If the mean is below
+        `_UP_MEAN_MIN_NORM` it falls back to the dominant axis of the up vectors.
         """
         if not self.images:
             raise ValueError("cannot derive an up vector from an empty PosedImageSet")

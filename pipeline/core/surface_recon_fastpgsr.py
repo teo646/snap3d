@@ -1,31 +1,8 @@
 """COLMAP-format dataset (images/ + sparse/) -> high-poly Mesh via Fast-PGSR
-(FastGS applied to PGSR, third_party/FastGS on its `fast-pgsr` branch).
+(third_party/FastGS, `fast-pgsr` branch): planar Gaussians fused through TSDF into
+`mesh/tsdf_fusion_post.ply`, largest connected component only.
 
-PGSR's method, accelerated. FastGS changes how densification
-decides which Gaussians to keep - a loss-map threshold plus separate absolute-gradient
-and gradient thresholds for splitting and cloning - and trains the two SH bands at
-separate learning rates. The reconstruction it produces is still PGSR's: planar
-Gaussians fused through TSDF into `mesh/tsdf_fusion_post.ply`, largest connected
-component only.
-
-That shared contract is why this wrapper is thin. Fast-PGSR takes every argument PGSR
-does plus nine of its own, writes the mesh to the same path under the same name, and
-applies the same `post_process_mesh(cluster_to_keep=1)`. The dataset builders and the
-masked render dataset are reused from the PGSR stage unchanged.
-
-It runs in its own `fastgs` conda env, cloned from `pgsr` so it inherits the
-torch 2.11+cu128 build that works on this GPU. A separate env is not optional: both
-repos ship packages called `diff-plane-rasterization`, `fused-ssim` and `simple-knn`,
-with different sources behind the same names, so installing one into the other's
-environment silently replaces the other's rasterizer.
-
-Patched in the submodule (third_party/patches/FastGS.patch): the missing `<cstdint>` /
-`<cfloat>` includes the PGSR submodule also needed; `quaternion_to_matrix`
-vendored in place of its pytorch3d import; the alpha-mask depth zeroing in
-`scripts/render_tnt.py`; `multi_view_weight_until_iter` actually bounding the multi-view
-loss in train.py; and a guard in both rasterizers'
-`duplicateToTilesTouched` against opacity below 1/255, which otherwise yields a NaN tile
-rect and an illegal memory access shortly after a densification.
+Runs in its own `fastgs` conda env. Submodule changes live in third_party/patches/FastGS.patch.
 """
 
 from __future__ import annotations
@@ -49,41 +26,30 @@ class FastPGSRConfig:
     max_depth: float = 8.0
     voxel_size: float = 0.002
     use_depth_filter: bool = True
-    # The nine parameters FastGS adds to PGSR. Values are upstream's own run_tnt.py,
-    # which is the only invocation its authors publish for this branch.
+    # The nine parameters FastGS adds to PGSR (upstream's run_tnt.py values).
     ncc_scale: float = 0.5
     opacity_cull_threshold: float = 0.05
     exposure_compensation: bool = True
     densification_interval: int = 500
     highfeature_lr: float = 0.02
     grad_abs_thresh: float = 0.0004
-    # Multiplier on the compact box that sets how many tiles each splat covers. Passed
-    # to both train and render: the mesh pass rasterises with the same setting.
+    # Multiplier on the compact box that sets how many tiles each splat covers (train and render).
     mult: float = 0.7
-    # Last iteration the multi-view loss is applied (it starts after 7000). Upstream
-    # declares 10000 but never reads it; the FastGS patch wires it.
+    # Last iteration the multi-view loss is applied.
     multi_view_weight_until_iter: int = 10000
-    # Weight on |rendered_alpha - mask| in train.py, wired by the FastGS patch. Only does
-    # anything when the training images carry an alpha channel, i.e. under
-    # surface_recon_fastpgsr. 0 is upstream's behaviour.
+    # Weight on |rendered_alpha - mask|; needs training images with an alpha channel. 0 disables.
     lambda_mask_alpha: float = 0.0
-    # Where FastGS keeps every training view's image, gray copy and mask. "cuda" holds them
-    # all in GPU memory, 5 float32 channels a pixel: about 60 MB a view at 3 MP, so ~7.4 GB
-    # for 124 views (measured on statue_all) - most of a 16 GB card, before training has
-    # allocated anything. "cpu" leaves them in RAM and moves one view's to the GPU per
-    # iteration instead (6 ms a view, measured), freeing that memory. Use "cpu" when the
-    # view count times the frame size does not leave room for training.
+    # Where FastGS keeps every training view's image, gray copy and mask. "cuda" is faster;
+    # "cpu" frees GPU memory when the view count times the frame size does not fit.
     data_device: str = "cuda"
-    # Read by the stage wrapper: dilates the per-view masks before compositing them into
-    # the render dataset's alpha, same as the PGSR path.
+    # Read by the stage wrapper: dilates the per-view masks before compositing them into the
+    # render dataset's alpha.
     mask_dilation_px: int = 1
     extra_train_args: list[str] = field(default_factory=list)
 
 
 def _run(cmd: list[str], cwd: Path) -> str:
-    """Streams the subprocess's output byte-chunked rather than line-buffered, since
-    tqdm's `\\r` progress bars never reach a line-by-line reader until they finish.
-    Accumulates it too, so a failure can report a tail."""
+    """Streams the subprocess's output in byte chunks (tqdm's `\\r` bars) and keeps it for failure tails."""
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
     chunks: list[bytes] = []
     assert proc.stdout is not None
@@ -111,21 +77,15 @@ def run_fastpgsr_surface_recon(
     render_dataset_dir: Path | None = None,
 ) -> Path:
     """`dataset_dir` must hold flat `images/` + `sparse/0/{cameras,images,points3D}.bin`.
-    Note the `0/`: despite deriving from PGSR, Fast-PGSR's reader is vanilla 3DGS's and
-    looks one level deeper than PGSR's flat `sparse/`.
 
-    `render_dataset_dir`, if given, replaces `dataset_dir` for the render/TSDF step only:
-    same layout but RGBA images whose alpha is the object mask, which the render pass
-    uses to zero background depth before integrating. Training stays on the unmasked
-    dataset, exactly as in the PGSR path.
+    `render_dataset_dir`, if given, replaces `dataset_dir` for the render/TSDF step only: RGBA
+    images whose alpha is the object mask, used to zero background depth before integrating.
 
-    Returns `mesh/tsdf_fusion_post.ply`: the largest connected component of the fused
-    mesh.
+    Returns `mesh/tsdf_fusion_post.ply`.
     """
     config = config or FastPGSRConfig()
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Absolute paths required: the subprocesses run with cwd=FASTGS_ROOT, so a relative
-    # -s/-m would resolve there instead of in the caller's directory.
+    # Absolute paths: the subprocesses run with cwd=FASTGS_ROOT.
     dataset_dir = dataset_dir.resolve()
     output_dir = output_dir.resolve()
     render_dataset_dir = render_dataset_dir.resolve() if render_dataset_dir else dataset_dir
@@ -149,12 +109,8 @@ def run_fastpgsr_surface_recon(
     ]
     _run(train_cmd, cwd=FASTGS_ROOT)
 
-    # scripts/render_tnt.py is what upstream's own run_tnt.py calls for this branch (the
-    # top-level render.py references an undefined `mesh_path` and cannot finish). It was
-    # patched with the two lines PGSR's render.py has that zero depth outside each view's
-    # alpha mask before TSDF integration: Tanks and Temples has no masks, so upstream
-    # never needed them, but without them our RGBA render dataset fuses every view's
-    # whole background - on boots 28 GB RSS plus 12 GB of swap ten views into fusion.
+    # scripts/render_tnt.py is patched to zero depth outside each view's alpha mask before TSDF
+    # integration; without it the whole background is fused.
     render_cmd = [
         config.python_bin, "scripts/render_tnt.py",
         "-s", str(render_dataset_dir),

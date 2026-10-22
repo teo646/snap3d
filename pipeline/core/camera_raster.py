@@ -1,20 +1,8 @@
-"""GPU low-poly mesh rasterization + POM march in one moderngl pass: per camera
-pixel, the RESOLVED atlas coordinate that pixel observes.
+"""GPU low-poly mesh rasterization + POM march in one moderngl pass: per camera pixel, the
+resolved atlas coordinate that pixel observes. The march is slf_shaders.RESOLVE_GLSL.
 
-Same fused "UV pass" the reference project (surface-light-fields-for-planar-paintings,
-render.build_uv_program) uses, generalized from a flat quad to an arbitrary mesh with
-hardware depth-tested occlusion. The march itself is slf_shaders.RESOLVE_GLSL - the
-same source the viewers compile, so a photo pixel's resolved uv during training and the
-viewer's resolved uv for the same view direction come from one implementation.
-`intrinsics_to_gl_projection`/`colmap_Rt_to_gl_view` are ported as-is from that
-project's render.py.
-
-Alongside each uv it writes the camera-space depth of the surface that uv stands for -
-the low-poly point pushed out along its normal by the height the march landed on - and,
-given a reference mesh, a second pass renders that mesh's own depth. Comparing the two
-catches the one error the march cannot fix: POM moves where on a surface a pixel lands,
-never *which* surface. Decimation shifts silhouettes, so where one part of the object
-overlaps another, pixels the photo shows on the front part rasterize onto the back one.
+Alongside each uv it writes the camera-space depth of the surface that uv stands for, and,
+given a reference mesh, that mesh's own depth, so occluded pixels can be rejected.
 """
 
 from __future__ import annotations
@@ -88,8 +76,7 @@ def _fs_header(num_steps: int) -> str:
 def intrinsics_to_gl_projection(
     fx: float, fy: float, cx: float, cy: float, width: int, height: int, near: float, far: float
 ) -> np.ndarray:
-    """Ported as-is from surface-light-fields-for-planar-paintings' `render.py`:
-    COLMAP pinhole intrinsics -> OpenGL clip-space projection matrix."""
+    """COLMAP pinhole intrinsics -> OpenGL clip-space projection matrix."""
     P = np.zeros((4, 4), dtype=np.float64)
     P[0, 0] = 2 * fx / width
     P[1, 1] = 2 * fy / height
@@ -102,8 +89,7 @@ def intrinsics_to_gl_projection(
 
 
 def colmap_Rt_to_gl_view(R: np.ndarray, t: np.ndarray) -> np.ndarray:
-    """Ported as-is from surface-light-fields-for-planar-paintings' `render.py`:
-    COLMAP world->camera (R, t) -> OpenGL view matrix (flips y/z: OpenCV -> OpenGL)."""
+    """COLMAP world->camera (R, t) -> OpenGL view matrix (flips y/z)."""
     V = np.eye(4, dtype=np.float64)
     V[:3, :3] = R
     V[:3, 3] = t
@@ -112,13 +98,8 @@ def colmap_Rt_to_gl_view(R: np.ndarray, t: np.ndarray) -> np.ndarray:
 
 
 def to_gl_texture(ctx, raster: np.ndarray):
-    """Uploads a (H, W, C) float32 raster as a GL texture. `raster` must already be in
-    this project's atlas convention (row 0 = top, i.e. v=1 - see uv_geometry.py's
-    module docstring); np.flipud puts row 0 at v=0 to match OpenGL's own bottom-left
-    texture origin, so sampling with the mesh's own (u, v) attribute (no flip) lands
-    on the correct texel. Shared by camera_raster.py and view_slf.py so a texture
-    built for training and one built for rendering follow the identical convention.
-    """
+    """Uploads a (H, W, C) float32 raster (row 0 = top, v=1) as a GL texture, flipped so
+    sampling with the mesh's own (u, v) lands on the correct texel."""
     import moderngl
 
     data = np.ascontiguousarray(np.flipud(raster), dtype=np.float32)
@@ -130,11 +111,8 @@ def to_gl_texture(ctx, raster: np.ndarray):
 
 
 class ParallaxRasterContext:
-    """Holds the GL resources for one slf_fit run: context, program, the per-texel
-    frame/height/validity textures RESOLVE_GLSL samples, and the mesh VAO - all built
-    once and reused across every photo (only the per-photo MVP changes). Construct
-    once per `run_slf_fit` call, `release()` when done.
-    """
+    """Holds the GL resources for one slf_fit run, built once and reused across photos (only the
+    MVP changes). Call `release()` when done."""
 
     def __init__(
         self,
@@ -165,10 +143,7 @@ class ParallaxRasterContext:
         self.prog["u_height_range"].value = float(height_range)
         self.prog["u_layer_step"].value = float(2.0 * height_range / num_steps)
 
-        # The frame RESOLVE_GLSL marches in is rebuilt per fragment from these three
-        # attributes, so they have to be the same per-vertex arrays uv_geometry
-        # interpolated into the atlas - hence vertex_frame_attributes, not a locally
-        # recomputed set.
+        # The three frame attributes must be the same arrays uv_geometry interpolated into the atlas.
         self._verts = uv_mesh.vertices.astype(np.float64)
         normals, tangent_raw, bitangent_raw = vertex_frame_attributes(uv_mesh)
         vbo_data = np.concatenate(
@@ -190,8 +165,7 @@ class ParallaxRasterContext:
         )
 
         self._fbo_cache: dict[tuple[int, int, int], object] = {}
-        # Pinned host buffers the framebuffers are read into, reused across views: a
-        # fresh 12 MP float readback allocation per photo cost more than the render.
+        # Pinned host buffers reused across views.
         self._host_cache: dict[tuple[int, int, int], object] = {}
 
         self._ref = None
@@ -226,9 +200,8 @@ class ParallaxRasterContext:
     def _render(
         self, K: np.ndarray, R: np.ndarray, t: np.ndarray, cam_center: np.ndarray, width: int, height: int
     ):
-        """Renders both passes and reads them into the pinned host buffers. Returns
-        (uv_depth (H, W, 3) torch cpu pinned, reference (H, W, 1) or None, any_front),
-        both still in OpenGL's bottom-up row order."""
+        """Renders both passes into the pinned host buffers. Returns (uv_depth (H, W, 3),
+        reference (H, W, 1) or None, any_front), in OpenGL's bottom-up row order."""
         cam_pts = (R @ self._verts.T).T + t
         depth = cam_pts[:, 2]
         front_depth = depth[depth > 1e-6]
@@ -237,10 +210,7 @@ class ParallaxRasterContext:
         near = max(float(front_depth.min()) * 0.5, 1e-5)
         far = float(front_depth.max()) * 2.0 + 1e-3
 
-        # +0.5: OpenGL samples each fragment at its pixel center (integer pixel i is
-        # evaluated at continuous coordinate i+0.5); shifting cx/cy by +0.5 cancels
-        # that so pixel i means the same continuous image coordinate as the photo
-        # array's index i.
+        # +0.5: GL samples fragments at pixel centers.
         proj = intrinsics_to_gl_projection(K[0, 0], K[1, 1], K[0, 2] + 0.5, K[1, 2] + 0.5, width, height, near, far)
         view = colmap_Rt_to_gl_view(R, t)
         mvp = (proj @ view).astype(np.float32)
@@ -272,10 +242,8 @@ class ParallaxRasterContext:
     def resolve_torch(
         self, K: np.ndarray, R: np.ndarray, t: np.ndarray, cam_center: np.ndarray, width: int, height: int, device
     ):
-        """`resolve`, returned as tensors on `device` and never post-processed on the
-        host: uv (H, W, 2) float32, valid (H, W) bool, surface_depth (H, W),
-        reference_depth (H, W) or None. The per-pixel work after the readback - flip,
-        mask, zeroing - was most of the fit's per-photo time as numpy on 12 MP arrays."""
+        """`resolve` as tensors on `device`: uv (H, W, 2), valid (H, W) bool, surface_depth (H, W),
+        reference_depth (H, W) or None."""
         import torch
 
         uv_depth, reference, any_front = self._render(K, R, t, cam_center, width, height)
@@ -283,7 +251,7 @@ class ParallaxRasterContext:
             z = torch.zeros((height, width), device=device)
             return torch.zeros((height, width, 2), device=device), z.bool(), z, None
         raw = uv_depth.to(device, non_blocking=True).flip(0)  # OpenGL row0=bottom -> row0=top
-        valid = raw[:, :, 0] >= 0.0  # cleared to -1; f_uv_depth.xy is clamped to [0,1] where written
+        valid = raw[:, :, 0] >= 0.0  # cleared to -1
         uv = torch.where(valid.unsqueeze(-1), raw[:, :, :2], 0.0)
         surface_depth = torch.where(valid, raw[:, :, 2], 0.0)
         reference_depth = None
@@ -294,33 +262,27 @@ class ParallaxRasterContext:
     def resolve(
         self, K: np.ndarray, R: np.ndarray, t: np.ndarray, cam_center: np.ndarray, width: int, height: int
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-        """Returns (uv (H, W, 2) normalized [0,1], valid (H, W) bool, surface_depth
-        (H, W), reference_depth (H, W) or None).
+        """Returns (uv (H, W, 2) in [0,1], valid (H, W) bool, surface_depth (H, W),
+        reference_depth (H, W) or None).
 
-        uv/valid: for each camera pixel, the parallax-resolved uv of the nearest
-        (smallest camera-space depth) triangle covering it, invalid wherever
-        `_FRAGMENT_BODY` discarded - no triangle at all, resolved uv fell outside
-        [0, 1], or atlas.valid is false there. The reference repo's `render_uv_pass`
-        returns exactly this.
-
-        surface_depth: camera-space z of the height-displaced point that uv stands for.
-        reference_depth: camera-space z of the reference mesh's nearest surface, 0 where
-        it covers nothing; None without a reference mesh. Both 0 where not written.
+        valid is False where no triangle covers the pixel, the resolved uv left [0, 1], or
+        atlas.valid is false. surface_depth is the camera-space z of the height-displaced point;
+        reference_depth is the reference mesh's camera-space z (0 where it covers nothing).
         """
         uv_depth, reference, any_front = self._render(K, R, t, cam_center, width, height)
         if not any_front:
             z = np.zeros((height, width), dtype=np.float32)
             return np.zeros((height, width, 2), dtype=np.float64), z.astype(bool), z, None
-        raw = np.flipud(uv_depth.numpy())  # OpenGL row0=bottom -> row0=top (matches the photo/array convention)
+        raw = np.flipud(uv_depth.numpy())  # OpenGL row0=bottom -> row0=top
 
-        valid = raw[:, :, 0] >= 0.0  # cleared to -1; f_uv_depth.xy is clamped to [0,1] where written
+        valid = raw[:, :, 0] >= 0.0  # cleared to -1
         uv = raw[:, :, :2].astype(np.float64)
         uv[~valid] = 0.0
         surface_depth = np.where(valid, raw[:, :, 2], 0.0).astype(np.float32)
 
         reference_depth = None
         if reference is not None:
-            # copy: the host buffer is reused by the next call
+            # copy: the host buffer is reused
             reference_depth = np.flipud(reference.numpy()[:, :, 0]).copy()
         return uv, valid, surface_depth, reference_depth
 

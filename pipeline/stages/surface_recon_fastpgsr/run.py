@@ -1,53 +1,8 @@
-"""Surface reconstruction stage wrapper (Fast-PGSR), trained on background-masked
-images instead of the full frame - the `surface_recon` of every photo pipeline (see
-photo_pipeline.yaml's header comment).
+"""Surface reconstruction stage wrapper (Fast-PGSR), trained on background-masked images.
 
-The dataset `train_cmd` reads from is built from masking's masked `images/`, not
-resize_dataset's unmasked ones. The final TSDF fusion uses a separate render dataset
-with the mask composited in as alpha.
-
-Why this exists: FastGS/PGSR's photometric loss (L1+SSIM), single-view normal loss, and
-multi-view NCC loss are all computed over the *entire* frame. On a capture where the
-object is a small fraction of each photo (measured on p2: masks cover a median 7.8% of
-the frame), that means ~90% of every training signal is spent fitting a background that
-usually isn't even geometrically consistent between views (a handheld orbit around a
-small object crosses a cluttered room, not a fixed backdrop) - which on p2 produced one
-large warped sheet (bounding box ~1.8x1.2x0.6m for a ~15cm stone) rather than the object.
-Training on masking's pixel-masked images instead removes that competing signal
-entirely.
-
-That fix is not free, and is more likely to bite exactly when it is reached for (a
-small object in a cluttered frame, i.e. a high boundary-to-area ratio):
-
-  * The flat fill colour meeting real texture at the silhouette is a hard edge with no
-    real-world counterpart. SSIM's windowed comparison straddles it, and the optimiser
-    can cheapest-explain the discontinuity with thin "fringe" Gaussians right at the
-    boundary - exactly where silhouette accuracy matters most downstream.
-  * A flat-coloured region has ~zero reconstruction error at *any* depth, so Gaussians
-    seeded there by SfM (which still ran on the original, unmasked photos) have little
-    pressure to be culled rather than settle into a flat backdrop plane - trading one
-    failure mode (a warped sheet) for a related one (a flat sheet) is possible.
-  * The masking stage's own mask (used for SfM point filtering elsewhere) is tightened
-    with `mask_dilation_px` - too little margin here clips real object silhouette into
-    the fill colour instead of just removing it.
-
-The second of those is what `lambda_mask_alpha` addresses, and it is why the right lever
-is alpha rather than the photometric losses. A background-coloured training pixel
-constrains rendered *colour* only, which a black opaque Gaussian satisfies exactly as
-well as empty space does; nothing in the photometric terms distinguishes the two. Nor do
-FastGS's pruning passes, because all of them (multi-view trim's `out_observe`,
-`densify_and_prune_fastgs`'s importance and pruning scores) key off whether a Gaussian
-was *rendered*, not whether it was penalised, and a backdrop Gaussian is rendered in
-every view. Supervising accumulated alpha against the mask penalises the geometry
-directly. Restricting L1/SSIM to the mask instead - the obvious-looking alternative -
-makes this strictly worse, since it removes the background constraint altogether while
-leaving every pruning heuristic equally blind; measured on p3, 26k Gaussians became 107k
-and the highpoly mesh 1.5M -> 3.4M verts.
-
-A tighter crop around the mask's bounding box (with adjusted intrinsics) would avoid
-the hard-edge/flat-backdrop failure modes entirely, since every remaining pixel would
-still be real photographic content - that is the likely next step if masked-background
-training plus alpha supervision doesn't fully fix it.
+The training dataset is built from masking's masked `images/`; the final TSDF fusion uses a
+separate render dataset with the mask composited in as alpha. `lambda_mask_alpha` supervises the
+rendered alpha against that mask.
 """
 
 from __future__ import annotations

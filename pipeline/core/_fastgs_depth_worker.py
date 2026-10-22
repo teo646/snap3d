@@ -1,10 +1,6 @@
-"""Runs inside the `fastgs` conda env (see surface_recon_fastpgsr.py for why it is
-separate): loads a trained Fast-PGSR checkpoint and writes, per camera, the
-`plane_depth` its renderer produces - the same map train.py's losses use and
-scripts/render_tnt.py fuses into the mesh - as float32 .npy (H, W), camera-space z.
-
-Not imported by the pipeline: gaussian_depth.py launches it with the fastgs
-interpreter and cwd set to the FastGS checkout.
+"""Runs inside the `fastgs` conda env: loads a trained Fast-PGSR checkpoint and writes, per camera,
+the renderer's `plane_depth` as float32 .npy (H, W), camera-space z. Launched by gaussian_depth.py
+with cwd set to the FastGS checkout.
 """
 
 import argparse
@@ -47,8 +43,7 @@ def main() -> None:
         for i, c in enumerate(cameras):
             W, H = c["width"], c["height"]
             fx, fy, cx, cy = c["fx"], c["fy"], c["cx"], c["cy"]
-            # FastGS's Camera fixes the principal point at the image centre; anything else
-            # would render a shifted depth map, silently misaligned with the photo.
+            # FastGS's Camera fixes the principal point at the image centre.
             if abs(cx - 0.5 * W) > 0.5 or abs(cy - 0.5 * H) > 0.5:
                 raise ValueError(f"{c['name']}: principal point ({cx}, {cy}) is not the image centre of {W}x{H}")
             R_w2c = np.asarray(c["R"], dtype=np.float64)

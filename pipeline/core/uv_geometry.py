@@ -1,15 +1,9 @@
-"""UV-atlas geometry: rasterizes a `UVMesh` into per-texel position/normal/tangent
-arrays (same bbox + barycentric scan as `baking._rasterize_uv_mesh`), plus the
+"""UV-atlas geometry: rasterizes a `UVMesh` into per-texel position/normal/tangent arrays, plus the
 per-vertex frame attributes the shaders rebuild that frame from.
 
-Pixel/UV convention, which must match baking.py and slf_shaders.py's
-`xy_to_uv`/`uv_to_xy` exactly: (u, v) maps to array coordinates
-(x, y) = (u*W - 0.5, (1 - v)*H - 0.5), so row 0 is the top and texel i's center is at
-u = (i + 0.5)/W. That half-texel offset is where GL's `texture()` actually samples,
-and every texel weight computed here is eventually inverted against a `texture()`
-call (sh_math.cg_solve_bilinear_texels) - getting it wrong misregisters training
-against rendering by up to half a texel. `uv_to_atlas_xy`/`sample_bilinear` are the
-only place the conversion happens on the numpy side.
+Pixel/UV convention (must match baking.py and slf_shaders.py's `xy_to_uv`/`uv_to_xy`):
+(u, v) maps to array coordinates (x, y) = (u*W - 0.5, (1 - v)*H - 0.5), so row 0 is the top and
+texel i's center is at u = (i + 0.5)/W.
 """
 
 from __future__ import annotations
@@ -36,25 +30,18 @@ __all__ = [
     "GUTTER_TEXELS",
 ]
 
-# Gutter width in texels. A gutter has to cover bilinear's 2x2 neighbourhood (1 texel)
-# plus the sub-texel overshoot of the POM march, both counted in texels rather than UV
-# area, and it does not scale with resolution. Swept 1..16 at 1024^2 on a synthetic
-# benchmark set (no longer in this repo): render coverage is flat to 0.05%, i.e. no march lands
-# outside a 1-texel gutter - so 1 is the minimum and buys the most chart area.
+# Gutter width in texels: covers bilinear's 2x2 neighbourhood plus the POM march's sub-texel overshoot.
 GUTTER_TEXELS = 1
 
 
 def dilate_radius_for(width: int, height: int, ref_texels: int = GUTTER_TEXELS) -> int:
-    """Gutter radius in texels - a fixed count. `width`/`height` are ignored, and kept
-    only so every call site reads the same."""
+    """Gutter radius in texels (fixed; `width`/`height` are ignored)."""
     return max(1, int(ref_texels))
 
 
 def compute_vertex_tangents(vertices: np.ndarray, faces: np.ndarray, uv: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Per-vertex raw (un-normalized) tangent/bitangent from the UV parametrization
-    (Lengyel's method), accumulated over incident faces. The magnitude is world units
-    per UV unit: direction gives the frame, length converts a world step to a UV step.
-    """
+    """Per-vertex raw (un-normalized) tangent/bitangent (Lengyel's method), accumulated over
+    incident faces. Magnitude is world units per UV unit."""
     v0, v1, v2 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
     uv0, uv1, uv2 = uv[faces[:, 0]], uv[faces[:, 1]], uv[faces[:, 2]]
     edge1, edge2 = v1 - v0, v2 - v0
@@ -76,10 +63,8 @@ def compute_vertex_tangents(vertices: np.ndarray, faces: np.ndarray, uv: np.ndar
 
 
 def orthonormal_frame(raw_tangent: np.ndarray, normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Gram-Schmidt `raw_tangent` against `normal` (both (..., 3)) -> unit (tangent,
-    bitangent). Degenerate tangents fall back to an arbitrary orthogonal vector, which
-    only affects that texel's frame orientation. GLSL twin: slf_shaders.uv_frame.
-    """
+    """Gram-Schmidt `raw_tangent` against `normal` -> unit (tangent, bitangent). GLSL twin:
+    slf_shaders.uv_frame."""
     n = normal / np.clip(np.linalg.norm(normal, axis=-1, keepdims=True), 1e-12, None)
     t = raw_tangent - n * np.sum(raw_tangent * n, axis=-1, keepdims=True)
     t_len = np.linalg.norm(t, axis=-1, keepdims=True)
@@ -95,9 +80,7 @@ def orthonormal_frame(raw_tangent: np.ndarray, normal: np.ndarray) -> tuple[np.n
 
 
 def vertex_normals_for(uv_mesh: UVMesh) -> np.ndarray:
-    """Per-vertex normals, falling back to trimesh's smooth ones when the .obj carried
-    none. The single source: the atlas and the shaders' vertex attributes only agree
-    because both start here."""
+    """Per-vertex normals, falling back to trimesh's smooth ones when the .obj carried none."""
     normals = uv_mesh.vertex_normals
     if normals is None:
         normals = Mesh(vertices=uv_mesh.vertices, faces=uv_mesh.faces).to_trimesh().vertex_normals
@@ -105,22 +88,16 @@ def vertex_normals_for(uv_mesh: UVMesh) -> np.ndarray:
 
 
 def vertex_frame_attributes(uv_mesh: UVMesh) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(normal, raw tangent, raw bitangent) per vertex - everything a shader needs to
-    rebuild the local frame with no frame texture at all.
-
-    These are the same arrays `rasterize_uv_atlas` interpolates barycentrically, so a
-    fragment interpolating them gets the identical value, not an approximation. The
-    tangents stay un-normalized because their length is the `xy_per_height` scale.
-    """
+    """(normal, raw tangent, raw bitangent) per vertex: what a shader needs to rebuild the local
+    frame. The same arrays `rasterize_uv_atlas` interpolates."""
     normals = vertex_normals_for(uv_mesh)
     tangent, bitangent = compute_vertex_tangents(uv_mesh.vertices, uv_mesh.faces, uv_mesh.uv)
     return normals, tangent, bitangent
 
 
 def uv_to_atlas_xy(uv: np.ndarray, width: int, height: int) -> np.ndarray:
-    """(N, 2) UV in [0, 1] (UVMesh convention) -> (N, 2) continuous atlas (x, y).
-    Numpy twin of slf_shaders.py's GLSL `uv_to_xy` - see this module's docstring for
-    why the half-texel offset is mandatory rather than cosmetic."""
+    """(N, 2) UV in [0, 1] -> (N, 2) continuous atlas (x, y). Numpy twin of slf_shaders.py's
+    `uv_to_xy`."""
     x = uv[:, 0] * width - 0.5
     y = (1.0 - uv[:, 1]) * height - 0.5
     return np.stack([x, y], axis=-1)
@@ -136,15 +113,10 @@ def uv_to_atlas_xy_torch(uv, width: int, height: int):
 def dilate_valid(
     valid: np.ndarray, fields: list[np.ndarray], radius: int, target_valid: np.ndarray | None = None
 ) -> np.ndarray:
-    """Texture-padding: every invalid texel within `radius` of a valid one takes that
-    nearest valid texel's values (in place, per array in `fields`) and becomes valid.
-    Closes thin-triangle rasterization gaps and bleed-pads chart edges so bilinear
-    sampling near a seam never blends in an untouched zero. Returns the new valid mask;
-    `valid` is not modified.
+    """Texture padding: every invalid texel within `radius` of a valid one takes that nearest valid
+    texel's values (in place, per array in `fields`) and becomes valid. Returns the new valid mask.
 
-    `target_valid`, if given, is used as the fill region instead of the `radius` ball -
-    for a caller that already has an authoritative coverage mask (baking.py's gutter)
-    and wants these fields padded to exactly it.
+    `target_valid`, if given, replaces the `radius` ball as the fill region.
     """
     if target_valid is None:
         if not valid.any() or (~valid).sum() == 0:
@@ -174,15 +146,9 @@ class UVAtlasGeometry:
 
 
 def rasterize_uv_atlas(uv_mesh: UVMesh, target_valid: np.ndarray | None = None) -> UVAtlasGeometry:
-    """Per-texel position/normal/tangent arrays, rasterized with the same bbox +
-    barycentric scan as `baking._rasterize_uv_mesh` so texel alignment matches the
-    already-baked HeightMap.
+    """Per-texel position/normal/tangent arrays, rasterized like `baking._rasterize_uv_mesh`.
 
-    Pass a HeightMap's `valid` as `target_valid` to get back exactly baking's gutter
-    mask: the two rasterizers' pre-dilate cores differ by a few texels at slivers
-    (baking.py has a fallback for a sliver too thin to hold a texel center), so without
-    it the two masks are not guaranteed identical. Omit it to use this rasterizer's own
-    radius dilate.
+    Pass a HeightMap's `valid` as `target_valid` to reproduce baking's gutter mask exactly.
     """
     w, h = uv_mesh.texture_resolution
     positions = np.zeros((h, w, 3), dtype=np.float64)
@@ -195,8 +161,7 @@ def rasterize_uv_atlas(uv_mesh: UVMesh, target_valid: np.ndarray | None = None) 
     vertex_normals = vertex_normals_for(uv_mesh)
     vertex_tangent, vertex_bitangent = compute_vertex_tangents(verts, faces, uv)
 
-    # Same map as uv_to_atlas_xy / slf_shaders.uv_to_xy: in this space texel i's center
-    # is at x == i, so testing integer coordinates tests texel centers.
+    # Same map as uv_to_atlas_xy: texel i's center is at x == i.
     px = uv[:, 0] * w - 0.5
     py = (1.0 - uv[:, 1]) * h - 0.5
 
@@ -246,8 +211,7 @@ def rasterize_uv_atlas(uv_mesh: UVMesh, target_valid: np.ndarray | None = None) 
 
 
 def sample_bilinear(raster: np.ndarray, xy: np.ndarray) -> np.ndarray:
-    """Bilinear-samples a (H, W, C) raster at continuous atlas coordinates xy (N, 2);
-    edges clamp rather than wrap."""
+    """Bilinear-samples a (H, W, C) raster at continuous atlas coordinates xy (N, 2); edges clamp."""
     h, w = raster.shape[:2]
     x0f = np.floor(xy[:, 0])
     y0f = np.floor(xy[:, 1])

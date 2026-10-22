@@ -1,9 +1,7 @@
 """Hole-close stage wrapper: high-poly mesh -> hole-closed high-poly mesh.
 
-Writes `mesh_highpoly.obj`, the same name surface_recon uses, so decimation's `mesh`
-and baking's `highpoly_mesh` inputs can be repointed here unchanged - and both must be,
-since baking has to ray-cast against the same closed surface decimation saw (see
-pipeline/core/hole_close.py).
+Writes `mesh_highpoly.obj`, the same name surface_recon uses; decimation's `mesh` and baking's
+`highpoly_mesh` inputs must both point here (see pipeline/core/hole_close.py).
 """
 
 from __future__ import annotations

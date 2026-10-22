@@ -1,12 +1,8 @@
 """Photo set -> (PosedImageSet, PointCloud) via COLMAP structure-from-motion.
 
-Shells out to the `colmap` CLI (feature extraction -> matching -> incremental mapping
--> undistortion) and parses the sparse model into this project's schemas. Everything
-downstream sees only the returned PosedImageSet - PINHOLE cameras and already-undistorted
-images, whatever distortion model COLMAP used internally. The one exception is a capture
-solved with `camera_model: SIMPLE_PINHOLE`: the undistorter passes that model through
-unchanged, so its cameras stay SIMPLE_PINHOLE (`[f, cx, cy]`) until `resize_dataset`
-converts them.
+Shells out to the `colmap` CLI (feature extraction -> matching -> mapping -> undistortion) and
+parses the sparse model into this project's schemas. Cameras come out PINHOLE, except
+`camera_model: SIMPLE_PINHOLE` captures, which stay SIMPLE_PINHOLE until `resize_dataset`.
 """
 
 from __future__ import annotations
@@ -33,10 +29,10 @@ __all__ = ["PhotoSfMConfig", "run_photo_sfm", "run_sfm_model", "ColmapError"]
 @dataclass
 class PhotoSfMConfig:
     colmap_binary: str = "colmap"
-    camera_model: str = "SIMPLE_RADIAL"  # self-calibrates distortion; undistorted to PINHOLE afterwards
-    single_camera: bool = True  # assume every photo came from the same physical camera/lens
+    camera_model: str = "SIMPLE_RADIAL"  # undistorted to PINHOLE afterwards
+    single_camera: bool = True  # every photo came from the same camera/lens
     use_gpu: bool = True
-    matcher: str = "exhaustive"  # {"exhaustive", "sequential"} - sequential suits near-ordered captures
+    matcher: str = "exhaustive"  # {"exhaustive", "sequential"}
     extra_feature_extractor_args: list[str] = field(default_factory=list)
     extra_mapper_args: list[str] = field(default_factory=list)
 
@@ -49,20 +45,15 @@ def run_photo_sfm(
 ) -> tuple[PosedImageSet, PointCloud]:
     """Runs COLMAP SfM + undistortion.
 
-    `images_dir`: directory of input photos (any layout COLMAP accepts - flat directory
-    of image files).
-    `feature_mask_dir`: optional `--ImageReader.mask_path` - a directory of
-    `<image name>.png` masks (0 = ignore) restricting where keypoints are detected.
-    Given one, the reconstruction is solved from those pixels alone, which is what puts
-    the resulting poses in the *object's* frame rather than the scene's. The undistorted images this returns are still
-    whole frames - only feature detection was masked.
+    `images_dir`: directory of input photos.
+    `feature_mask_dir`: optional `--ImageReader.mask_path`, a directory of `<image name>.png`
+    masks (0 = ignore) restricting keypoint detection; the returned images are still whole frames.
     `workspace_dir`: scratch + output directory. On success it contains:
         database.db          - COLMAP feature/match database
-        sparse_raw/<n>/       - raw (possibly multiple, possibly distorted-model) reconstructions
-        undistorted/images/  - PINHOLE-undistorted images (this becomes posed_images' images_dir)
-        undistorted/sparse/  - undistorted sparse model (TXT, parsed into the return values)
-    Returns the parsed (PosedImageSet, PointCloud); the caller (stage wrapper) decides
-    where the final posed_images directory lives and copies/moves files there.
+        sparse_raw/<n>/      - raw reconstructions
+        undistorted/images/  - PINHOLE-undistorted images
+        undistorted/sparse/  - undistorted sparse model (TXT)
+    Returns the parsed (PosedImageSet, PointCloud).
     """
     config = config or PhotoSfMConfig()
     binary = find_colmap_binary(config.colmap_binary)
@@ -101,17 +92,13 @@ def run_sfm_model(
     feature_mask_dir: Path | None = None,
     image_names: list[str] | None = None,
 ) -> Path:
-    """Feature extraction -> matching -> incremental mapping, returning the directory of
-    the largest model the mapper produced (still in the raw, self-calibrated camera
-    model: undistortion is a separate step, see `_undistort_images`).
+    """Feature extraction -> matching -> incremental mapping, returning the directory of the
+    largest model (still in the raw camera model; see `_undistort_images`).
 
-    `image_names` restricts the run to those images, given relative to `images_dir`
-    exactly as COLMAP will name them (`"1/IMG_4141.JPG"`). That is what lets several
-    independent reconstructions of subsets of one capture be built from a single
-    source directory without copying or linking any photos.
+    `image_names` restricts the run to those images, relative to `images_dir`.
 
-    Creates `workspace_dir/{database.db, sparse_raw/}`. `workspace_dir` must be empty of
-    a previous run's database, or COLMAP appends to it.
+    Creates `workspace_dir/{database.db, sparse_raw/}`; `workspace_dir` must not hold a previous
+    run's database.
     """
     binary = find_colmap_binary(config.colmap_binary)
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -132,8 +119,7 @@ def run_sfm_model(
 
 
 def _count_database_images(database_path: Path) -> int:
-    """Every image `feature_extractor` saw, regardless of whether the mapper managed to
-    register it - the denominator for how much of the capture actually made it in."""
+    """Every image `feature_extractor` saw, registered or not."""
     conn = sqlite3.connect(str(database_path))
     try:
         return conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]

@@ -1,8 +1,5 @@
-"""Decimation stage wrapper: hole-closed high-poly mesh -> low-poly mesh.
-
-Component filtering happens inside `run_decimation` (largest connected component only,
-matching PGSR's post_process_mesh), so there is no separate cleanup stage in front of
-this one.
+"""Decimation stage wrapper: hole-closed high-poly mesh -> low-poly mesh (largest connected
+component only, inside `run_decimation`).
 """
 
 from __future__ import annotations

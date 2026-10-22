@@ -1,16 +1,8 @@
 """Geometry-only glTF Binary (.glb) writer/reader for the export bundle's mesh.
 
-The bundle ships positions, UVs and indices - no normals, no tangents, no texture. The
-surface's appearance is the SH texture plus the parallax march, which no glTF material
-can express, so nothing here pretends otherwise: the single material is plain white and
-references no image, and exists only because several importers (trimesh among them)
-drop TEXCOORD_0 from a primitive that has no material at all.
-
-trimesh can export a GLB, but it synthesises a material *with* a texture - a grey 1x1
-PNG and a `baseColorTexture` pointing at it - and the bundle has already been cleaned of
-one round of that pollution. Writing the container directly is ~60 lines and also keeps
-the vertex order byte-identical to the arrays handed in, which matters here: the
-per-vertex frame a consumer recomputes is a function of that exact ordering.
+Positions, UVs and indices only. The single plain white material references no image and exists
+because several importers drop TEXCOORD_0 from a primitive without a material. The container is
+written directly so vertex order stays byte-identical to the input arrays.
 """
 
 from __future__ import annotations
@@ -46,8 +38,7 @@ def write_glb(
     *,
     name: str = "mesh",
 ) -> int:
-    """Writes (V,3) positions, (V,2) UVs and (F,3) indices as a single-primitive GLB.
-    Returns the file size."""
+    """Writes (V,3) positions, (V,2) UVs and (F,3) indices as a single-primitive GLB; returns the file size."""
     positions = np.ascontiguousarray(positions, dtype=np.float32)
     uv = np.ascontiguousarray(uv, dtype=np.float32)
     indices = np.ascontiguousarray(indices, dtype=np.uint32)
@@ -66,7 +57,7 @@ def write_glb(
         (uv.tobytes(), _TARGET_ARRAY_BUFFER),
     ):
         views.append({"buffer": 0, "byteOffset": len(buffer), "byteLength": len(payload), "target": target})
-        buffer += _pad4(payload)  # every payload is a multiple of 4 already; belt and braces
+        buffer += _pad4(payload)
 
     gltf = {
         "asset": {"version": "2.0", "generator": "3d_recon_sh_texture export"},
@@ -98,8 +89,7 @@ def write_glb(
                 "componentType": _COMPONENT_FLOAT,
                 "count": int(len(positions)),
                 "type": "VEC3",
-                # Required by the spec for POSITION, and the only reason a viewer can
-                # frame the mesh without decoding the buffer first.
+                # Required by the spec for POSITION.
                 "min": positions.min(axis=0).tolist(),
                 "max": positions.max(axis=0).tolist(),
             },
@@ -110,8 +100,7 @@ def write_glb(
                 "type": "VEC2",
             },
         ],
-        # Textureless and white: see the module docstring. Without any material at all,
-        # importers are entitled to drop the UVs as unused.
+        # Textureless and white; see the module docstring.
         "materials": [
             {"name": "sh_texture", "pbrMetallicRoughness": {"metallicFactor": 0.0, "roughnessFactor": 1.0}}
         ],
@@ -134,11 +123,8 @@ def write_glb(
 
 
 def read_glb(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Inverse of `write_glb`: (positions (V,3) f32, uv (V,2) f32, indices (F,3) u32).
-
-    Reads the first primitive of the first mesh, and only the layouts `write_glb`
-    produces (tightly packed, no byteStride, no sparse accessors) - it is a check that
-    the file says what it was meant to say, not a general glTF importer."""
+    """Inverse of `write_glb`: (positions (V,3) f32, uv (V,2) f32, indices (F,3) u32). Reads
+    only the layouts `write_glb` produces; not a general glTF importer."""
     raw = Path(path).read_bytes()
     magic, version, _total = struct.unpack_from("<III", raw, 0)
     if magic != _GLB_MAGIC or version != 2:

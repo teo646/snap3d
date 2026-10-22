@@ -1,19 +1,11 @@
 """posed_images -> a flat, training-resolution COLMAP `dense/` dataset (`images/` +
-`sparse/*.bin`), what the surface_recon stages and masking read.
+`sparse/*.bin`), what surface_recon and masking read.
 
-ingest's photos are already undistorted - PINHOLE, or SIMPLE_PINHOLE when the capture
-was solved without a distortion term - so this does not undistort anything. It does two
-things: downscales every photo so its longer side is at most `max_image_size`, with each
-camera's intrinsics scaled to match, and writes the model in COLMAP's binary layout, which
-is what the 3DGS-style dataset reader wants. A photo already small enough is copied
-as it is. SIMPLE_PINHOLE cameras leave as PINHOLE: `--max_image_size` rounds each axis
-separately, so 4060x3035 -> 2000x1495 is not quite the same scale in x and y, and one
-focal length could not describe it.
-
-The sparse points keep their tracks, with the 2D pixel coordinates scaled to the new
-resolution. The tracks matter even though only positions and colours seed the training:
-the 3DGS point loader drops every point whose track is shorter than 3, so a point cloud
-written without them loads as empty.
+Downscales every photo so its longer side is at most `max_image_size` (intrinsics scaled to
+match; smaller photos are copied) and writes the model in COLMAP's binary layout.
+SIMPLE_PINHOLE cameras leave as PINHOLE because the per-axis rounding makes x and y scales differ.
+Sparse point tracks are kept, with 2D coordinates scaled; the point loader drops points with
+tracks shorter than 3.
 """
 
 from __future__ import annotations
@@ -37,13 +29,12 @@ __all__ = ["ResizeDatasetConfig", "run_resize_dataset", "scaled_pinhole", "scale
 
 @dataclass
 class ResizeDatasetConfig:
-    colmap_binary: str = "colmap"  # only to convert the text model to binary
+    colmap_binary: str = "colmap"  # converts the text model to binary
     max_image_size: int = 2000
 
 
 def scaled_size(width: int, height: int, max_image_size: int) -> tuple[int, int]:
-    """(width, height) with the longer side brought down to `max_image_size`; unchanged
-    when already within it. Never enlarges."""
+    """(width, height) with the longer side brought down to `max_image_size`; never enlarges."""
     scale = max_image_size / max(width, height)
     if scale >= 1.0:
         return width, height
@@ -77,10 +68,6 @@ def run_resize_dataset(
 ) -> Path:
     """Returns `workspace_dir/dense` with `images/` + `sparse/{cameras,images,points3D}.bin`.
     `images_dir` is the stage directory `posed_images` was loaded from.
-
-    Runs *before* masking, so SAM3 segments the exact (possibly downscaled) images
-    surface_recon will use and no mask-resize reconciliation is needed. This module is
-    mask-oblivious as a result; dilation and alpha-compositing happen in surface_recon.
     """
     config = config or ResizeDatasetConfig()
     binary = find_colmap_binary(config.colmap_binary)
@@ -89,8 +76,7 @@ def run_resize_dataset(
     out_images = dense_dir / "images"
     out_images.mkdir(parents=True)
 
-    # One output size per camera, taken from its photos; photos of one camera that
-    # disagree on size would need different intrinsics, which one camera cannot have.
+    # One output size per camera, taken from its photos.
     size_of_camera: dict[int, tuple[int, int]] = {}
     for img in posed_images.images:
         src = posed_images.image_path(images_dir, img)
@@ -131,7 +117,7 @@ def run_resize_dataset(
     )
     points = sparse_points
     if sparse_points is not None and sparse_points.track_image_ids is not None:
-        # Each pixel scales by the factors of the camera of the image it was seen in.
+        # Each pixel scales by the factors of its image's camera.
         factor = {}
         for img in posed_images.images:
             old, new = posed_images.cameras[img.camera_id], cameras[img.camera_id]

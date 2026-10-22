@@ -1,12 +1,6 @@
-"""Resize-dataset stage wrapper: posed_images -> a flat, training-resolution dense/
-workspace (images/ + sparse/*.bin) for surface_recon and masking to consume.
-
-No lens distortion is removed here - ingest already outputs undistorted images. This
-stage downscales them to training resolution (`max_image_size`), scales the cameras to
-match, and writes the model in the binary layout the 3DGS-style dataset reader wants - see
-pipeline/core/resize_dataset.py. Stages that need the full-resolution originals (slf, in
-photo_pipeline.yaml) read `posed_images: ingest` instead, bypassing this stage. Runs
-before masking and is mask-oblivious by design.
+"""Resize-dataset stage wrapper: posed_images -> a flat, training-resolution dense/ workspace
+(images/ + sparse/*.bin) for surface_recon and masking (see pipeline/core/resize_dataset.py).
+Stages that need the full-resolution originals read `posed_images: ingest` instead.
 """
 
 from __future__ import annotations

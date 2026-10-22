@@ -17,9 +17,8 @@ _MIN_COMPONENT_FACES = 50
 
 
 def _keep_largest_component(mesh: Mesh) -> Mesh:
-    """Drops every connected component but the largest, then removes the degenerate
-    triangles and unreferenced vertices the removal leaves behind. Mirrors PGSR's own
-    post_process_mesh (num_cluster=1)."""
+    """Drops every connected component but the largest, then removes degenerate triangles and
+    unreferenced vertices."""
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(np.asarray(mesh.vertices, dtype=np.float64)),
         o3d.utility.Vector3iVector(np.asarray(mesh.faces, dtype=np.int32)),
@@ -43,13 +42,8 @@ def _keep_largest_component(mesh: Mesh) -> Mesh:
 @dataclass
 class DecimationConfig:
     target_face_count: int = 20_000
-    # False because the PGSR/TSDF mesh is never watertight: scan6 has 187,960 boundary
-    # edges scattered over the whole surface, and preserve_boundary=True treats each as
-    # an uncollapsable loop - it stalls at 230,771 faces against a 20,000 target and
-    # shatters the surface into 5,135 components (largest 1.16%), which is what baking's
-    # ray-cast picked up as bogus heights. False reaches the target (19,984 faces, 626
-    # components, largest 73%). Its own cost - micro-holes chaining into large tears -
-    # is handled upstream by the hole_close stage.
+    # False because the TSDF mesh is never watertight and preserve_boundary=True stalls and
+    # shatters the surface; micro-holes chaining into tears are handled by the hole_close stage.
     preserve_boundary: bool = False
     preserve_normal: bool = True
 
@@ -66,10 +60,7 @@ def run_decimation(mesh: Mesh, config: DecimationConfig | None = None) -> Mesh:
     result = ms.current_mesh()
     vertices, faces = result.vertex_matrix(), result.face_matrix()
 
-    # Collapse still leaves stray sliver islands near the input's small holes (626
-    # components on scan6 vs 1 in the input), and baking's ray-cast wants coherent
-    # surface, not speckle. Only the largest component is kept, matching PGSR's own
-    # post_process_mesh.
+    # Keep only the largest component; collapse leaves stray sliver islands.
     cleaned = _keep_largest_component(Mesh(vertices=vertices, faces=faces))
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(cleaned.vertices),

@@ -1,13 +1,7 @@
 """SLF stage wrapper: posed_images + uv_mesh + baseline height_map -> height_map + sh_texture_map.
 
-The optional `masking` input restricts every photo to the object's own silhouette, so
-that a frame where something crossed in front of the subject cannot fit the intruder's
-colour into the texels behind it. It is optional because a capture that needs no segmenting
-skips the masking stage entirely.
-
-Calls `core.slf_fit.run_slf_fit`, which ports the CG + AtA/Atb precision-weighted
-SH fit from surface-light-fields-for-planar-paintings@53f5787 (see that module's
-docstring for how it's adapted from a single plane to an arbitrary UV-mapped mesh).
+The optional `masking` input restricts every photo to the object's silhouette. Calls
+`core.slf_fit.run_slf_fit`.
 """
 
 from __future__ import annotations
@@ -53,8 +47,7 @@ def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -
         mult = (recon_manifest.params if recon_manifest else {}).get("mult")
         if mult is None:
             raise RuntimeError(f"no `mult` in {recon_dir}'s manifest params - is it a Fast-PGSR surface_recon stage?")
-        # Rendered fresh into the stage dir and deleted after the fit: 12 MP float32 per
-        # view is gigabytes, and anything left here is re-hashed by every downstream stage.
+        # Rendered into the stage dir and deleted after the fit (gigabytes per run).
         reference_depth_dir = render_gaussian_depths(
             find_model_dir(recon_dir), posed_images, output_dir / "_gaussian_depth", mult=float(mult)
         )

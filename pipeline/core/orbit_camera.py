@@ -1,12 +1,8 @@
-"""Orbit camera + GL matrices, shared by the interactive viewers and the export
-stage - so the pose a bundle ships as "open here" is the pose view_slf.py opens with.
+"""Orbit camera + GL matrices, shared by the interactive viewers and the export stage.
 
-The orbit is built around an explicit `up` axis rather than world +Y. A reconstruction's
-world frame has no notion of up - COLMAP fixes it from whichever image came first
-(scan6 lands near -Y) and a Blender scene is Z-up - so a +Y-up orbit shows most runs
-lying on their side and spins about the wrong axis. What the capture does know is where
-the top of each photo pointed; averaging that recovers the axis it was shot upright
-about (PosedImageSet.mean_up_vector, viewers/_common.capture_up_vector).
+The orbit turns about an explicit `up` axis (PosedImageSet.mean_up_vector,
+viewers/_common.capture_up_vector) rather than world +Y, since a reconstruction's world frame
+has no up of its own.
 """
 
 from __future__ import annotations
@@ -17,8 +13,7 @@ __all__ = ["DEFAULT_UP", "OrbitCamera", "horizontal_basis", "orbit_angles", "loo
 
 DEFAULT_UP = np.array([0.0, 1.0, 0.0])
 
-# Seeds for the horizontal reference axis, tried in order. Z first so `up=+Y` gives
-# right=+X, forward=+Z; 0.9 is just "not nearly parallel".
+# Seeds for the horizontal reference axis, tried in order; 0.9 means "not nearly parallel".
 _BASIS_SEEDS = (np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
 _BASIS_MAX_ALIGNMENT = 0.9
 
@@ -32,8 +27,7 @@ def horizontal_basis(up: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 class OrbitCamera:
-    """Spherical orbit around `origin` about the `up` axis. `up=DEFAULT_UP` reproduces
-    the old hardcoded world-Y-up orbit exactly, starting azimuth included."""
+    """Spherical orbit around `origin` about the `up` axis."""
 
     def __init__(self, origin: np.ndarray, radius: float, up: np.ndarray = DEFAULT_UP):
         self.origin = origin.astype(np.float64)
@@ -51,23 +45,17 @@ class OrbitCamera:
 
     @property
     def view_up(self) -> np.ndarray:
-        """The up vector the view is drawn with: `up`, or `-up` once the camera has gone
-        over the pole (cos(elevation) < 0). The position is a great circle and continues
-        smoothly past 90 degrees, but a fixed `up` would flip the picture there - and
-        be degenerate exactly at the pole - so the drawn up turns over with the camera,
-        as a trackball's does."""
+        """The up vector the view is drawn with: `up`, or `-up` once the camera has gone over the pole."""
         return self.up if np.cos(np.radians(self.elevation)) >= 0.0 else -self.up
 
     def rotate(self, dx_deg: float, dy_deg: float) -> None:
-        """Orbit by a drag of (`dx_deg`, `dy_deg`) with no limit in either direction:
-        360 degrees about the up axis, and over the poles. Horizontal drag follows the
-        picture, so it turns the other way once the camera is upside down. Elevation is
-        wrapped to (-180, 180] and never left on the pole itself."""
+        """Orbit by a drag of (`dx_deg`, `dy_deg`) with no limit, over the poles. Elevation is
+        wrapped to (-180, 180] and never left on the pole."""
         flipped = np.cos(np.radians(self.elevation)) < 0.0
         self.azimuth += dx_deg if flipped else -dx_deg
         elevation = self.elevation + dy_deg
         elevation = (elevation + 180.0) % 360.0 - 180.0
-        if abs(abs(elevation) - 90.0) < 1e-3:  # look_at degenerates with the view along `up`
+        if abs(abs(elevation) - 90.0) < 1e-3:  # look_at degenerates along `up`
             elevation += 2e-3
         self.elevation = elevation
         self.azimuth = (self.azimuth + 180.0) % 360.0 - 180.0
@@ -87,17 +75,8 @@ class OrbitCamera:
         return look_at(self.position.astype(np.float32), self.origin.astype(np.float32), self.view_up.astype(np.float32))
 
     def roll(self, angle_deg: float) -> None:
-        """Tilt `up` by rotating it about the current view axis (position -> origin) -
-        the same motion as tilting your head while keeping the shot otherwise the same.
-        For correcting a capture's estimated up axis by eye when it fitted crooked.
-
-        `_right` and `_forward` are rotated by the same amount, not rebuilt from the new
-        `up` via `horizontal_basis` - that function's world-seed reference has no reason
-        to track a rolling `up`, so re-deriving from it every call would drag `position`
-        along for the ride instead of leaving it fixed. Rotating the whole (right,
-        forward, up) frame together is what keeps position fixed (it is, up to sign, the
-        rotation axis itself) and composes cleanly over repeated small rolls.
-        """
+        """Tilt `up` by rotating it about the current view axis, keeping position fixed. `_right`
+        and `_forward` rotate by the same amount."""
         view_dir = self.origin - self.position
         view_dir /= np.linalg.norm(view_dir) + 1e-10
         theta = np.radians(angle_deg)
@@ -112,16 +91,14 @@ class OrbitCamera:
 
 
 def orbit_angles(direction: np.ndarray, up: np.ndarray) -> tuple[float, float]:
-    """(azimuth, elevation) in degrees such that an OrbitCamera with `up` looks from
-    `direction` - the inverse of OrbitCamera.position's spherical form. Lets a caller
-    express a measured viewpoint in the same two numbers the orbit is driven by."""
+    """(azimuth, elevation) in degrees such that an OrbitCamera with `up` looks from `direction`."""
     up = np.asarray(up, dtype=np.float64) / np.linalg.norm(up)
     d = np.asarray(direction, dtype=np.float64) / np.linalg.norm(direction)
     right, forward = horizontal_basis(up)
     elevation = np.degrees(np.arcsin(np.clip(d @ up, -1.0, 1.0)))
     horizontal = d - (d @ up) * up
     norm = np.linalg.norm(horizontal)
-    if norm < 1e-9:  # looking straight down the up axis; azimuth is arbitrary
+    if norm < 1e-9:  # straight down the up axis; azimuth is arbitrary
         return 0.0, float(elevation)
     horizontal /= norm
     return float(np.degrees(np.arctan2(horizontal @ right, horizontal @ forward))), float(elevation)

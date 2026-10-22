@@ -1,23 +1,10 @@
 """height baseline + posed images -> per-texel SH reflectance fit (SLF).
 
-Ports the CG + AtA/Atb fitting core of teo646/surface-light-fields-for-planar-
-paintings @ 53f5787 from a single flat painting to an arbitrary UV-mapped mesh:
-
-  - The reference's one global (u_axis, v_axis, normal) frame becomes a per-texel
-    frame from the UV parametrization (uv_geometry.orthonormal_frame).
-  - Its GPU "UV pass" (rasterize, then per-fragment POM march of a height texture to
-    resolve which uv a photo pixel really observes) becomes camera_raster's
-    `ParallaxRasterContext`, rasterizing the real low-poly mesh with hardware depth
-    testing. The march is slf_shaders.RESOLVE_GLSL - literally the same source the
-    viewers use, not a port of it.
-  - Per-photo texel colors come from the same matrix-free CG solve of
-    (B^T B + ridge I) u = B^T b (sh_math.cg_solve_bilinear_texels); SH coefficients
-    accumulate into per-texel AtA/Atb across photos, precision-weighted, solved with
-    torch.linalg.solve. `d` is `view_local`, already relative to the texel's own
-    normal, so sh_math.hsh_remap applies per texel rather than once globally.
-
-Coefficients are fit against raw [0, 1] RGB with no storage centering: the
-reference's "-0.5" trick was specific to its uint16 PNG encoding.
+Per photo, texel colors come from a matrix-free CG solve of (B^T B + ridge I) u = B^T b
+(sh_math.cg_solve_bilinear_texels). SH coefficients accumulate into per-texel AtA/Atb across
+photos and are solved with torch.linalg.solve. Photo pixels are mapped to texels by
+camera_raster's `ParallaxRasterContext` (rasterize, then slf_shaders.RESOLVE_GLSL parallax
+march). Coefficients are fit against raw [0, 1] RGB.
 """
 
 from __future__ import annotations
@@ -40,13 +27,10 @@ from pipeline.schemas.uv_mesh import UVMesh
 
 __all__ = ["SLFFitConfig", "run_slf_fit", "TEXEL_STATUS_COLORS", "save_texel_status_map"]
 
-# Per-texel fit outcome -> (name, BGR for cv2.imwrite, one-line meaning). Order is
-# priority: a texel is classified as the first of these it matches, and the five are
-# mutually exclusive and exhaustive over every texel of the atlas.
+# Per-texel fit outcome -> (name, BGR for cv2.imwrite, meaning). A texel takes the first match;
+# the five are mutually exclusive and exhaustive.
 TEXEL_STATUS_COLORS: dict[str, tuple[tuple[int, int, int], str]] = {
-    # Values are (B, G, R) - cv2's channel order, since save_texel_status_map writes
-    # them straight into an image via cv2.imwrite. The legend .json reverses each to
-    # RGB. Comments below name the colour as it actually displays.
+    # Values are (B, G, R) for cv2.imwrite; the legend .json reverses them to RGB.
     "background": (
         (0, 255, 255),  # -> RGB (255,255,0): yellow
         "atlas 밖 (rasterize_uv_atlas + baking의 gutter 확장에도 포함 안 됨); 렌더에서 절대 샘플되지 않음",
@@ -78,11 +62,8 @@ def save_texel_status_map(
     rejected_low_precision: np.ndarray,
     never_observed: np.ndarray,
 ) -> None:
-    """Writes a flat-colour (H, W, 3) PNG at `path`, one TEXEL_STATUS_COLORS entry per
-    texel, plus a `<path>.legend.json` mapping each colour to its name and meaning.
-    All five boolean masks are (H, W) and are treated in TEXEL_STATUS_COLORS' order,
-    so a texel is coloured by the first mask it is True in - background first (nothing
-    below it can be true for a texel outside the atlas), well_fit next, and so on."""
+    """Writes a flat-colour (H, W, 3) PNG with one TEXEL_STATUS_COLORS entry per texel, plus
+    `<path>.legend.json`. The five (H, W) masks are applied in TEXEL_STATUS_COLORS order."""
     import json
 
     h, w = atlas_valid.shape
@@ -115,41 +96,26 @@ def save_texel_status_map(
 
 @dataclass
 class SLFFitConfig:
-    sh_degree: int = 1  # (degree + 1) ** 2 coefficients per channel, e.g. degree=2 -> 9; supports 0-3
-    min_observations_per_texel: int = 4  # below this, fall back to a flat degree-0 average (see run_slf_fit)
+    sh_degree: int = 1  # (degree + 1) ** 2 coefficients per channel; supports 0-3
+    min_observations_per_texel: int = 4  # below this, fall back to a flat degree-0 average
     ridge: float = 1e-4  # SH normal-equations ridge (AtA diagonal)
-    num_steps: int = 7  # POM ray-march layers - match view_slf.py's --num-steps to be exact
+    num_steps: int = 7  # POM ray-march layers; match view_slf.py's --num-steps
     recon_min_precision: float = 0.0
     min_precision_ridge_ratio: float = 10.0
-    # Reject a pixel whose resolved surface depth differs from the reference (high-poly)
-    # mesh's depth at that pixel by more than this fraction of the reference depth - it
-    # landed on a different surface than the photo shows, typically the back part where
-    # two parts of the object overlap. Relative, so it means the same at any capture
-    # scale. 0 disables the test and the reference mesh is not needed.
+    # Reject a pixel whose resolved depth differs from the reference depth by more than this
+    # fraction of it. 0 disables the test.
     depth_test_tolerance: float = 0.0
-    # What the depth test compares against: "highpoly" renders the fused mesh baking
-    # baked from; "gaussians" loads per-view depth maps rendered from the trained
-    # Gaussians (pipeline.core.gaussian_depth), which keep structure thinner than the
-    # mesh's TSDF voxels - fibres, thin edges - that still occludes in a photo.
+    # Depth reference: "highpoly" (the fused mesh baking used) or "gaussians" (per-view depth
+    # from the trained Gaussians, pipeline.core.gaussian_depth).
     depth_reference: str = "highpoly"
-    # Excludes a photo's outer border from sampling: a pixel within this fraction of
-    # image width/height of any edge is dropped before the mask/depth tests, same as
-    # them. COLMAP's `image_undistorter` (resize_dataset's or ingest's own) has no
-    # crop or border-validity mask, so a lens with real distortion can leave black (or
-    # otherwise unsourced) pixels at the frame edge that this pipeline never detects -
-    # this is a blunt guard against fitting them as real colour, at the cost of ignoring
-    # real image content in that margin. 0 disables it (the default: most of this
-    # project's captures are phone cameras with negligible distortion - see README).
+    # Drops pixels within this fraction of width/height of any image edge. 0 disables.
     border_margin_frac: float = 0.0
     device: str = "cuda"
 
 
 def _load_photo(path: Path, device: torch.device) -> torch.Tensor | None:
-    """(H, W, 3) float32 RGB in [0, 1] on `device`, or None if unreadable. JPEGs decode
-    on the GPU (nvJPEG); anything else through cv2. Both ignore EXIF Orientation, as
-    COLMAP, PIL and SAM3 do: cv2 would otherwise rotate a phone capture's
-    Orientation-6 JPEG and sample every observation from a transposed photo.
-    torchvision's decode_jpeg leaves orientation alone unless asked."""
+    """(H, W, 3) float32 RGB in [0, 1] on `device`, or None if unreadable. JPEGs decode on the
+    GPU (nvJPEG), anything else through cv2; both ignore EXIF orientation."""
     if device.type == "cuda" and path.suffix.lower() in (".jpg", ".jpeg"):
         from torchvision.io import ImageReadMode, decode_jpeg, read_file
 
@@ -157,7 +123,7 @@ def _load_photo(path: Path, device: torch.device) -> torch.Tensor | None:
             rgb = decode_jpeg(read_file(str(path)), mode=ImageReadMode.RGB, device=device)
             return rgb.permute(1, 2, 0).float().div_(255.0)
         except RuntimeError:
-            pass  # e.g. a progressive or CMYK JPEG nvJPEG rejects - fall through to cv2
+            pass  # nvJPEG rejects e.g. progressive or CMYK JPEGs
     bgr = cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
     if bgr is None:
         return None
@@ -176,15 +142,9 @@ def run_slf_fit(
     fit_stats_path: Path | None = None,  # if given, the .npz the slf_bound stage re-fits from
     debug_status_path: Path | None = None,  # if given, a per-texel fit-status PNG - see TEXEL_STATUS_COLORS
 ) -> SHTextureMap:
-    """Fits the SH texture map. With `fit_stats_path`, also saves what a later re-fit
-    needs without re-reading any photo: per observed texel the normal equations (AtA
-    with the ridge on, Atb), the observed colour range, and whether the texel fell back
-    to a flat average; plus the hole-fill map (each padded texel's source texel), so a
-    re-fit can re-pad from its own coefficients. See pipeline/core/slf_bound.py.
-
-    With `debug_status_path`, also saves a flat-colour PNG classifying every texel of
-    the atlas into one of TEXEL_STATUS_COLORS - which texels got a real fit, which are
-    padding, and why, at a glance."""
+    """Fits the SH texture map. With `fit_stats_path`, also saves what slf_bound needs to re-fit
+    (normal equations, observed colour range, flat-fallback flags, hole-fill map). With
+    `debug_status_path`, also saves a per-texel fit-status PNG (TEXEL_STATUS_COLORS)."""
     config = config or SLFFitConfig()
     if config.depth_reference not in ("highpoly", "gaussians"):
         raise ValueError(f"depth_reference must be 'highpoly' or 'gaussians', got {config.depth_reference!r}")
@@ -204,17 +164,10 @@ def run_slf_fit(
     if masks_dir is not None and not masks_dir.is_dir():
         raise ValueError(f"masks_dir {masks_dir} is not a directory")
 
-    # One frame for both the POM march and the SH fit: the *flat* low-poly tangent
-    # plane, which is what height_map's values are measured against (baking.py casts
-    # rays along that normal). It is shipped as vertex attributes, not textures - a
-    # renderer rebuilds it per fragment from the same arrays the atlas interpolates
-    # (uv_geometry.vertex_frame_attributes, slf_shaders.uv_frame), so the rebuilt
-    # frame is this one rather than an approximation of it.
+    # One frame for the POM march and the SH fit: the flat low-poly tangent plane that
+    # height_map is measured against.
     tangent_flat, bitangent_flat = orthonormal_frame(atlas.tangent_raw, atlas.normals)
 
-    # The atlas-pixel shift per world-unit of height (the reference's
-    # `u_uv_per_length`, per texel here) is slf_shaders.xy_per_height now: the raw
-    # tangent attributes carry the lengths it is made of.
     height_range = height_map.march_range()
 
     pos_flat_t = torch.from_numpy(atlas.positions.reshape(P, 3).astype(np.float32)).to(device)
@@ -226,20 +179,16 @@ def run_slf_fit(
     Atb = torch.zeros(P, K, 3, dtype=torch.float32, device=device)
     support_count = torch.zeros(P, dtype=torch.int32, device=device)
     total_precision = torch.zeros(P, dtype=torch.float32, device=device)
-    # Per-texel, per-channel range of the per-photo colours the fit is fed - saved with
-    # the normal equations (fit_stats_path) for the slf_bound stage. Taken over the
-    # CG-solved texel colours rather than raw pixels, so one bright speck in one photo
-    # does not set a texel's bound.
+    # Per-texel, per-channel range of the CG-solved texel colours, saved for slf_bound.
     obs_min = torch.full((P, 3), float("inf"), dtype=torch.float32, device=device)
     obs_max = torch.full((P, 3), float("-inf"), dtype=torch.float32, device=device)
 
-    # One GPU context/program/texture set for the whole run; only the MVP changes per
-    # photo. The same rasterize-then-march GLSL pass the viewers use at render time.
+    # One GPU context for the whole run; only the MVP changes per photo.
     raster_ctx = ParallaxRasterContext(
         uv_mesh, atlas, height_map.data, height_range, config.num_steps,
         reference_mesh=reference_mesh if use_mesh_reference else None,
     )
-    border_masks: dict[tuple[int, int], torch.Tensor] = {}  # (height, width) -> keep-interior mask, built once each
+    border_masks: dict[tuple[int, int], torch.Tensor] = {}  # (height, width) -> keep-interior mask
 
     def _border_mask(height: int, width: int) -> torch.Tensor:
         key = (height, width)
@@ -268,29 +217,20 @@ def run_slf_fit(
             t = np.array([img.pose.tx, img.pose.ty, img.pose.tz], dtype=np.float64)
             cam_center = img.pose.camera_center()
 
-            # The object mask, if masking ran. Without it a pixel is fit into the texel
-            # its uv resolves to whatever the photo shows there - and where something
-            # crosses in front of the object (a hand, a cable), that intruder's colour is
-            # what lands in the texel. The depth test only catches an occluder the
-            # reference geometry itself contains, which a transient one is not.
+            # Object mask: drops pixels where something other than the object is in front.
             mask = None
             if masks_dir is not None:
                 mask_path = masks_dir / f"{img.file_name}.png"
                 mask_img = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
                 if mask_img is None:
                     raise FileNotFoundError(f"{img.file_name}: no mask at {mask_path}")
-                # The masks may be at either resolution - masking runs on
-                # resize_dataset's possibly-downscaled frames. The downscale is a pure
-                # resize, so nearest-neighbour keeps the mask binary and aligned.
+                # Masks may be at either resolution; nearest-neighbour keeps them binary.
                 if mask_img.shape != (cam.height, cam.width):
                     mask_img = cv2.resize(mask_img, (cam.width, cam.height), interpolation=cv2.INTER_NEAREST)
                 mask = torch.from_numpy(mask_img).to(device) > 127
 
-            # `keep` already means both "a triangle covers this pixel" and "the
-            # resolved uv is real, covered atlas territory" - both discarded in-shader,
-            # so no separate filtering is needed here.
-            # Everything per-pixel from here stays on the GPU: as numpy on 12 MP arrays
-            # the mask/zero/gather steps were most of each photo's time.
+            # `keep`: a triangle covers the pixel and the resolved uv is real atlas territory.
+            # Per-pixel work stays on the GPU.
             uv_full, keep, surface_depth, reference_depth = raster_ctx.resolve_torch(
                 K_mat, R, t, cam_center, cam.width, cam.height, device
             )
@@ -310,18 +250,15 @@ def run_slf_fit(
                     raise ValueError(f"{img.file_name}: reference depth {ref_np.shape} vs camera {tuple(keep.shape)}")
                 reference_depth = torch.from_numpy(ref_np).to(device, non_blocking=True)
             if reference_depth is not None:
-                # reference_depth is 0 where the reference covers nothing, which fails
-                # this too: a low-poly silhouette overhanging empty space.
+                # reference_depth is 0 where the reference covers nothing; that fails too.
                 agrees = (surface_depth - reference_depth).abs() <= config.depth_test_tolerance * reference_depth
                 n_depth_rejected = int((keep & ~agrees).sum().item())
                 keep = keep & agrees
-            # Boolean-mask indexing is row-major, the same observation order np.nonzero gave.
             uv_kept = uv_full[keep]
             if uv_kept.shape[0] == 0:
                 print(f"  [{i + 1:3d}/{n_images}] {img.file_name}: 0 valid after parallax resolve, skipping")
                 continue
-            # uv -> texel-index space through the one shared half-texel map, so the
-            # weights the CG solve inverts are the ones texture() will apply.
+            # uv -> texel-index space through the shared half-texel map.
             xy_t = uv_to_atlas_xy_torch(uv_kept, W, H)
             colors_t = photo[keep]
             x0, x1, y0, y1, fx, fy = bilinear_neighbors(xy_t[:, 0], xy_t[:, 1], W, H)
@@ -370,15 +307,11 @@ def run_slf_fit(
     AtA.diagonal(dim1=1, dim2=2).add_(config.ridge)
     coeffs = torch.linalg.solve(AtA, Atb)
 
-    # Observed = the normal equations carry more weight than the ridge prior. Texels
-    # failing this solved toward black; the dilation below overwrites them.
+    # Observed = the normal equations outweigh the ridge prior.
     well_conditioned = total_precision >= config.ridge * config.min_precision_ridge_ratio
     is_observed = (support_count > 0) & well_conditioned
 
-    # Too few views to trust the full-degree solve, but a degree-0 average is still
-    # meaningful: overwrite with [avg_color, 0, ...]. Atb[:,0,:]/AtA[:,0,0] is exactly
-    # the precision-weighted mean color (the C0 in Y[0]=C0 cancels), so these texels
-    # show a real if flat color instead of being flagged invalid.
+    # Too few views for the full-degree solve: fall back to the flat degree-0 weighted mean.
     under_observed = is_observed & (support_count < config.min_observations_per_texel)
     if under_observed.any():
         k0_avg = Atb[under_observed, 0, :] / AtA[under_observed, 0, 0].unsqueeze(-1).clamp_min(1e-8)
@@ -406,11 +339,8 @@ def run_slf_fit(
             never_observed=((support_count == 0)).cpu().numpy().reshape(H, W),
         )
 
-    # Texture padding, matching baking.py's: the shaders sample u_coeffs with
-    # GL_LINEAR gated on atlas.valid, so an unobserved-but-valid texel left at zero
-    # would bleed black into its observed neighbours, worst at chart seams. Nearest-
-    # copy (never average) so sampling near a seam blends two real fits. `valid`
-    # itself stays keyed on real observations; only the backing data is padded.
+    # Texture padding as in baking.py: nearest-copy so bilinear taps across seams blend real fits.
+    # `valid` stays keyed on real observations.
     holes = atlas.valid & ~observed
     hole_index = np.zeros(0, dtype=np.int64)
     hole_source = np.zeros(0, dtype=np.int64)
@@ -434,8 +364,7 @@ def run_slf_fit(
             hole_source=hole_source,
         )
 
-    # The mean camera up rides along with the coefficients: the fit does not need it,
-    # but it is the only record of which way was up. See SHTextureMap.up_vector.
+    # The mean camera up rides along; see SHTextureMap.up_vector.
     return SHTextureMap(
         data=coeffs.astype(np.float32),
         degree=config.sh_degree,

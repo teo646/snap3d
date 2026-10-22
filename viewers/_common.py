@@ -1,7 +1,5 @@
-"""Shared plumbing for the interactive viewers: run-dir lookup + capture up axis.
-
-The camera itself lives in pipeline/core/orbit_camera.py (the export stage needs it
-too) and is re-exported here, since every viewer imports it from this module.
+"""Shared plumbing for the interactive viewers: run-dir lookup + capture up axis. The camera is
+re-exported from pipeline/core/orbit_camera.py.
 """
 
 from __future__ import annotations
@@ -16,10 +14,7 @@ from pipeline.schemas.posed_images import PosedImageSet
 
 
 def find_stage_dir(run_dir: Path, stage_id: str) -> Path:
-    """The subdirectory of `run_dir` whose manifest records this stage. Not
-    `run_dir / "NN_<id>"`: that prefix is just the config's stage order, so inserting a
-    stage renumbers everything after it and a hardcoded name then points at the wrong
-    directory - or at a stale one from a previous pipeline shape."""
+    """The subdirectory of `run_dir` whose manifest records this stage (stage order numbering varies by config)."""
     matches = [
         d for d in sorted(run_dir.iterdir())
         if d.is_dir() and (m := read_manifest(d)) is not None and m.stage == stage_id
@@ -32,9 +27,8 @@ def find_stage_dir(run_dir: Path, stage_id: str) -> Path:
 
 
 def capture_up_vector(run_dir: Path, fallback: np.ndarray = DEFAULT_UP) -> np.ndarray:
-    """This run's world up: the mean of its ingest cameras' up vectors. Tolerant on
-    purpose - `run_dir` may be a stage dir or a bare mesh path - and falls back to +Y
-    rather than failing, since an orbit axis is a convenience, not correctness."""
+    """This run's world up: the mean of its ingest cameras' up vectors. `run_dir` may be a stage dir
+    or a bare mesh path; falls back to +Y."""
     try:
         ingest_dir = find_stage_dir(Path(run_dir), "ingest")
         return PosedImageSet.load(ingest_dir).mean_up_vector(ingest_dir)

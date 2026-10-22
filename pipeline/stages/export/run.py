@@ -1,22 +1,10 @@
 """Export stage wrapper: uv_mesh + slf -> render-ready `<run_id>_<storage>.snap3d/` folders.
 
-Terminal stage. Reads nothing the earlier stages did not already write; its whole job
-is to put the render-time inputs, and the handful of constants a renderer cannot infer
-from them, in one folder with no reference back to this repo's layout.
+Terminal stage. One bundle per SH storage (`unorm8` and `float16`), named after the run (read
+from the output directory's parent); layout in `pipeline/core/render_bundle.py`.
 
-Two bundles are written, one per SH storage (`unorm8` and `float16`; there is no param to
-choose one). Each goes in a `.snap3d` subfolder rather than in the stage directory
-itself, so that a deliverable stays one nameable thing next to the stage's own
-`manifest.json` instead of being mixed in with it. The folders are named after the run -
-the stage reads that off its own output directory's parent, which is the run dir the
-orchestrator made - so a bundle carried out of this tree still says which capture it is. See
-`pipeline/core/render_bundle.py` for the layout.
-
-`num_steps` is not a param here: it has to equal the value the SH coefficients were fit
-against, so it is read off the slf stage's own manifest rather than restated. The
-`posed_images` input is used for one thing only - aiming the bundle's initial view at
-the side the object was photographed from - and is optional; without it the view falls
-back to the config's fixed azimuth/elevation.
+`num_steps` is read off the slf stage's manifest, since it must equal the value the coefficients
+were fit with. The optional `posed_images` input only aims the bundle's initial view.
 """
 
 from __future__ import annotations
@@ -59,12 +47,10 @@ def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -
 
     config = RenderBundleConfig(num_steps=_slf_num_steps(slf_dir), **params)
     camera_centers = _camera_centers(input_dirs)
-    # `<run>/NN_export` -> the run's name. A stage run straight from the CLI into some
-    # other directory just gets that directory's parent, which is the best guess there is.
+    # `<run>/NN_export` -> the run's name.
     run_name = output_dir.resolve().parent.name
 
-    # Paths relative to the stage dir, i.e. inside the bundle folder - the manifest is
-    # the stage's, and it sits beside the bundles rather than in them.
+    # Paths relative to the stage dir.
     outputs: dict[str, str] = {}
     for sh_storage in SH_STORAGES:
         dir_name = bundle_dir_name(run_name, sh_storage)
@@ -102,9 +88,7 @@ def _uv_texture_resolution(uv_dir: Path) -> tuple[int, int]:
 
 
 def _slf_num_steps(slf_dir: Path) -> int:
-    """The march depth the coefficients were fit with. A config that leaves `num_steps`
-    out of the slf params fit with SLFFitConfig's default, so that is the fallback -
-    not an error, and not this stage's own default."""
+    """The march depth the coefficients were fit with; falls back to SLFFitConfig's default."""
     manifest = read_manifest(slf_dir)
     if manifest is not None and "num_steps" in manifest.params:
         return int(manifest.params["num_steps"])

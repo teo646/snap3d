@@ -1,16 +1,5 @@
-# Main conda env: GPU-enabled COLMAP + Python 3.12. ./setup.sh creates it and runs the pip step;
-# by hand:
-#
-#   conda env create -f environment.yml
-#   conda activate snap3d
-#   pip install -e ".[all]"        # the pipeline + SAM3 and the viewers' pygame
-#
-# Why the exact build strings: conda-forge's `colmap` package doesn't declare
-# `libfaiss`/`openimageio` as hard runtime dependencies even though the binary
-# is linked against them, so a plain `colmap` install can silently produce a
-# binary that fails with "error while loading shared libraries". Pinning the
-# exact builds below is the known-working combination (verified against this
-# machine's driver/CUDA 13.0 + RTX 50-series GPU).
+# Main conda env: GPU-enabled COLMAP + Python 3.12. ./setup.sh creates it and runs
+# `pip install -e ".[all]"`. The pinned builds keep colmap's libfaiss/openimageio links working.
 name: snap3d
 channels:
   - conda-forge

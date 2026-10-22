@@ -1,8 +1,6 @@
 """``texture_maps`` schema: baking -> height_map, slf -> height_map + sh_texture_map.
 
-These are the final web-facing deliverables. Canonical storage is always a
-lossless numpy array (`.npy` / `.npz`) so downstream fitting code never loses
-precision; each type also writes a human-viewable PNG preview alongside it.
+Canonical storage is a lossless numpy array (`.npy` / `.npz`); each type also writes a PNG preview.
 """
 
 from __future__ import annotations
@@ -21,22 +19,17 @@ _MARCH_HEADROOM = 1.15
 class HeightMap:
     """Scalar displacement field, shape (H, W), in `units`.
 
-    `valid[y, x] == False` marks a texel baking's rasterizer and gutter never reached -
-    as opposed to `data` there, which is a zero-init default that looks like a perfectly
-    ordinary height. `None` means the HeightMap predates the field, which callers should
-    read as "unknown", not "everything valid". rasterize_uv_atlas takes this as its
-    `target_valid` so the fit shares baking's exact gutter.
+    `valid[y, x] == False` marks a texel baking never reached (its `data` is a zero default).
+    `None` means the HeightMap predates the field. rasterize_uv_atlas takes it as `target_valid`.
     """
 
     data: np.ndarray
-    units: str = "scene"  # e.g. "scene" (same units as the mesh) or "normalized"
+    units: str = "scene"  # "scene" (mesh units) or "normalized"
     valid: np.ndarray | None = None  # (H, W) bool
 
     def march_range(self) -> float:
-        """Half-extent of the parallax march, in `units`: the largest displacement plus
-        15% headroom, so a ray entering at the top layer starts above every surface.
-        Shared because the fit and the renderer have to march the same slab - a
-        different range is a different resolved uv, hence a different color."""
+        """Half-extent of the parallax march: the largest displacement plus 15% headroom. The fit
+        and the renderer must march the same slab."""
         return max(float(np.abs(self.data).max()) * _MARCH_HEADROOM, 1e-6)
 
     def save(self, path: str | Path) -> None:
@@ -71,24 +64,17 @@ class HeightMap:
 class SHTextureMap:
     """Per-texel spherical-harmonics reflectance coefficients.
 
-    `data` is (H, W, (degree+1)**2, 3), fit per texel over the view directions that
-    observe it. `valid[y, x] == False` marks a texel with no real fit, so a caller
-    needing a trustworthy coefficient must check `valid` rather than `data` being
-    nonzero: slf_fit nearest-copies a neighbouring valid texel's coefficients into
-    those, the same padding baking applies, so bilinear sampling near a real texel
-    never blends in black.
+    `data` is (H, W, (degree+1)**2, 3). `valid[y, x] == False` marks a texel with no real fit
+    (slf_fit nearest-copies a neighbour's coefficients into it), so check `valid`, not `data`.
 
-    `up_vector` is the capture's mean camera up (PosedImageSet.mean_up_vector). It is
-    not part of the fit - the frame is UV-derived and rebuilt from vertex attributes -
-    but it is the only record of which way was up, and a viewer has nothing else to
-    orbit about. `None` means the npz predates the field; render-time code re-derives
-    it from the run's ingest stage.
+    `up_vector` is the capture's mean camera up (PosedImageSet.mean_up_vector); `None` means the
+    npz predates the field.
     """
 
     data: np.ndarray
     degree: int
     valid: np.ndarray  # (H, W) bool
-    up_vector: np.ndarray | None = None  # (3,) world-space, see above
+    up_vector: np.ndarray | None = None  # (3,) world-space
 
     def __post_init__(self) -> None:
         expected_coeffs = (self.degree + 1) ** 2
@@ -104,7 +90,7 @@ class SHTextureMap:
         if self.up_vector is not None:
             arrays["up_vector"] = np.asarray(self.up_vector, dtype=np.float32)
         np.savez_compressed(path.with_suffix(".npz"), **arrays)
-        # DC term (L=0) is the diffuse-albedo-like average response; useful quick preview.
+        # DC term (L=0): the average response.
         dc = np.clip(self.data[..., 0, :] * 0.5 / np.sqrt(np.pi), 0, 1)
         preview = (dc * 255.0).astype(np.uint8)
         cv2.imwrite(str(path), cv2.cvtColor(preview, cv2.COLOR_RGB2BGR))

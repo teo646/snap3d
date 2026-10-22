@@ -1,10 +1,7 @@
-"""SLF range-bound stage: re-fits slf's SH texture map so no texel's function leaves
-the colours it was observed with (see pipeline/core/slf_bound.py).
-
-Sits between slf and export, and republishes slf's layout - sh_texture_map.npz/.png
-and height_map.png - so export reads it exactly as it would read slf. A separate stage
-rather than an slf option so the bound can be retuned (range_tolerance) without
-re-running the fit, which reads every photo; this reads only slf's saved statistics.
+"""SLF range-bound stage: re-fits slf's SH texture map so no texel's function leaves the colours
+it was observed with (see pipeline/core/slf_bound.py). Republishes slf's layout so export reads
+it as it would read slf; a separate stage so `range_tolerance` can be retuned without re-running
+the fit.
 """
 
 from __future__ import annotations
@@ -33,11 +30,10 @@ def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -
     bounded, report = bound_sh_texture_map(SHTextureMap.load(slf_dir / "sh_texture_map.npz"), stats_path, config)
     print(f"  {report}")
     bounded.save(output_dir / "sh_texture_map.png")
-    # Through the schema, not a file copy: the png carries a sidecar (its value range).
+    # Through the schema, not a file copy: the png carries a sidecar.
     HeightMap.load(slf_dir / "height_map.png").save(output_dir / "height_map.png")
 
-    # export reads the march depth the coefficients were fit with from its slf input's
-    # manifest; carry slf's forward, since this stage's own params don't include it.
+    # Carry slf's num_steps forward; export reads it from this stage's manifest.
     slf_manifest = read_manifest(slf_dir)
     extra = {"report": report}
     if slf_manifest is not None and "num_steps" in slf_manifest.params:

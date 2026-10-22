@@ -1,35 +1,19 @@
 #!/usr/bin/env python
-"""Interactive viewer for an `export` bundle - the four files in a run's
-`<run_id>.snap3d/` folder and nothing else.
-
-This is the consumer's view of the deliverable: it never opens the run it came from, so
-anything it needs that the bundle does not carry is a hole in the format. What it does
-share with the pipeline is *code*, deliberately - the GLSL comes from
-`pipeline/core/slf_shaders.py` (the same source the fit compiled) and the per-vertex
-frame from `uv_geometry.vertex_frame_attributes`, because reproducing the fit's frame
-approximately is the one way to get subtly wrong colors everywhere.
-
-The frame is recomputed here rather than loaded: normals and the raw dP/du, dP/dv are
-pure functions of position + uv + indices, and at 65k vertices that costs ~30 ms
-against ~1.6 MB of payload they would otherwise add.
-
-The bundle is written in glTF and KTX2's own conventions (UV origin top-left, texture
-row 0 first), so the two conversions into this repo's v-up shader happen here, at load:
-`v <- 1 - v` on TEXCOORD_0, and the row flip `to_gl_texture` already does. A consumer
-writing its own shader against the glTF convention does neither, and instead flips the
-sign of the `-H` term in `xy_per_height`.
+"""Interactive viewer for an `export` bundle (the `<run_id>_<storage>.snap3d` folder), reading
+only the bundle's four files. Shares the GLSL (`slf_shaders`) and the per-vertex frame
+(`uv_geometry.vertex_frame_attributes`) with the fit. glTF/KTX2 conventions are converted at
+load: `v <- 1 - v` on TEXCOORD_0 and the `to_gl_texture` row flip.
 
 Usage:
-    pip install -e ".[viewer]"   # moderngl + pygame, not installed by default
+    pip install -e ".[viewer]"   # moderngl + pygame
     python viewers/view_bundle.py data/runs/<run_id>/NN_export/<run_id>_unorm8.snap3d
-    python viewers/view_bundle.py data/runs/<run_id>/10_export   # the stage dir works too
+    python viewers/view_bundle.py data/runs/<run_id>/NN_export   # the stage dir works too
 
 Controls: left-drag orbit, wheel zoom, WASD/arrows pan, Q/E roll the up axis,
 R reset view (including the up axis), ESC quit.
 
-Pass --modify_initial_cam to have quitting (ESC or closing the window) write the
-camera's pose at that moment back into the bundle's config.json as its initial_camera -
-a way to pick the opening shot by eye instead of by re-running the export.
+--modify_initial_cam writes the camera pose at quit back into the bundle's config.json
+as its initial_camera.
 """
 
 from __future__ import annotations
@@ -56,7 +40,7 @@ from pipeline.core.uv_geometry import vertex_frame_attributes  # noqa: E402
 from pipeline.schemas.uv_mesh import UVMesh  # noqa: E402
 
 BACKGROUND = (0.05, 0.05, 0.06)
-ROLL_DEG_PER_FRAME = 0.6  # held key, at the ~60 fps clock.tick below targets: 36 deg/s
+ROLL_DEG_PER_FRAME = 0.6
 
 FRAGMENT_BODY = (
     RESOLVE_GLSL
@@ -91,18 +75,13 @@ void main(){
 
 
 def resolve_bundle_dir(path: Path) -> Path:
-    """Accepts either the `.snap3d` folder or the export stage dir that holds it, so a
-    path copied out of a run listing works without knowing which level it points at.
-
-    The folder is named after its run, so it is found by suffix rather than by name; a
-    stage dir with no `.snap3d` child is returned as-is, which is what a bundle exported
-    before this convention looks like."""
+    """Accepts either the `.snap3d` folder or the export stage dir that holds it."""
     path = Path(path)
     if path.name.endswith(BUNDLE_SUFFIX):
         return path
     nested = sorted(child for child in path.glob(f"*{BUNDLE_SUFFIX}") if child.is_dir())
     if len(nested) > 1:
-        # An export holds one bundle per storage; the unorm8 one is the default to open.
+        # Default to the unorm8 bundle.
         unorm8 = [child for child in nested if child.name.endswith(f"_unorm8{BUNDLE_SUFFIX}")]
         if len(unorm8) == 1:
             print(f"{path} holds {len(nested)} bundles; opening {unorm8[0].name} "
@@ -119,14 +98,12 @@ def load_bundle(bundle_dir: Path):
     config = json.loads((bundle_dir / "config.json").read_text())
     files = config["files"]
     positions, uv, indices = read_glb(bundle_dir / files["mesh"])
-    sh = read_ktx2(bundle_dir / files["sh"])  # (K, H, W, 4), a unused; float32, or uint8 for "unorm8"
+    sh = read_ktx2(bundle_dir / files["sh"])  # (K, H, W, 4); float32, or uint8 for "unorm8"
     relief = read_ktx2(bundle_dir / files["height"])  # (H, W, 2): displacement, coverage
 
-    # v flipped back out of glTF's top-left origin, and the coefficients put back in
-    # the (H, W, K, 3) layout the fit and the shader think in.
+    # v flipped back from glTF's origin; coefficients back to (H, W, K, 3).
     uv = np.stack([uv[:, 0], 1.0 - uv[:, 1]], axis=1)
-    # vertex_normals=None on purpose: the bundle ships no frame, so this is the path a
-    # consumer takes, and it must be the path the viewer exercises.
+    # vertex_normals=None: the bundle ships no frame.
     uv_mesh = UVMesh(
         vertices=positions.astype(np.float64),
         faces=indices.astype(np.int64),
@@ -138,19 +115,8 @@ def load_bundle(bundle_dir: Path):
 
 
 def write_back_camera(bundle_dir: Path, config: dict, camera: OrbitCamera) -> None:
-    """Overwrite config.json's initial_camera - and up_vector, if rolling moved it -
-    with `camera`'s current pose.
-
-    `position` and `view_matrix` are derived fields - render_bundle.py writes them so a
-    consumer needs neither the orbit convention nor a look_at of its own to reproduce
-    the shot - so they are recomputed here too, rather than left stale. `near`/`far`
-    keep whatever multiple of the radius the export used, since view_bundle.py has no
-    opinion of its own on clip planes.
-
-    up_vector is the pole every other pose in the bundle orbits, so a change to it here
-    - only ever a Q/E roll, in this viewer - has to land on `config["up_vector"]`
-    itself, not just on this camera's own `initial_camera` entry.
-    """
+    """Overwrite config.json's initial_camera (and up_vector, if rolling moved it) with
+    `camera`'s current pose, recomputing the derived `position` and `view_matrix`."""
     cam_cfg = config["initial_camera"]
     near_scale = cam_cfg["near"] / cam_cfg["radius"]
     far_scale = cam_cfg["far"] / cam_cfg["radius"]
@@ -220,11 +186,9 @@ def run_viewer(bundle_dir: Path, width: int, height: int, modify_initial_cam: bo
     prog["u_height_range"].value = float(config["height"]["range"])
     prog["u_layer_step"].value = float(2.0 * config["height"]["range"] / num_steps)
 
-    # (H, W, K, 3) -> one texture-array layer per coefficient, v flipped like every
-    # other texture here (GL's origin is bottom-left, the atlas's is top-left).
+    # (H, W, K, 3) -> one array layer per coefficient, v flipped for GL.
     if unorm8:
-        # Uploaded as the bytes themselves (normalized unsigned, "f1"): half the memory of
-        # RGBA16F, and the shader applies offset + scale after the filtered lookup.
+        # Uploaded as the raw bytes; the shader applies offset + scale after the filtered lookup.
         layers = np.ascontiguousarray(np.transpose(np.flipud(sh), (2, 0, 1, 3)), dtype=np.uint8)
         coeff_tex = ctx.texture_array((tex_w, tex_h, k_coeffs), 3, layers.tobytes(), dtype="f1")
         prog["u_sh_offset"].write(np.asarray(config["sh"]["offset"], dtype=np.float32).tobytes())
@@ -294,8 +258,7 @@ def run_viewer(bundle_dir: Path, width: int, height: int, modify_initial_cam: bo
             camera.origin = camera.origin - pan_speed * right
         if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
             camera.origin = camera.origin + pan_speed * right
-        # Rolling the up axis is how a crooked capture gets straightened by eye, rather
-        # than by re-running whatever estimated it in the first place.
+        # Rolling the up axis straightens a crooked capture by eye.
         if keys[pygame.K_q]:
             camera.roll(-ROLL_DEG_PER_FRAME)
         if keys[pygame.K_e]:

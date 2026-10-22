@@ -1,8 +1,5 @@
-# Conda env for Fast-PGSR (third_party/FastGS), the surface reconstruction stage. It is separate
-# from `snap3d` because FastGS compiles its own CUDA extensions against torch 2.11 / CUDA 12.8,
-# while `snap3d` runs a newer torch.
-#
-# setup.sh creates this env and then builds the four extensions; to do it by hand see README.md.
+# Conda env for Fast-PGSR (third_party/FastGS). Separate from `snap3d` because FastGS builds its
+# CUDA extensions against torch 2.11 / CUDA 12.8. setup.sh creates it and builds the extensions.
 name: fastgs
 channels:
   - conda-forge

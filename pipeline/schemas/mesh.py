@@ -21,8 +21,7 @@ class Mesh:
         return len(self.vertices)
 
     def to_open3d(self) -> o3d.geometry.TriangleMesh:
-        # np.array(..., copy=True) below: trimesh sometimes hands back read-only
-        # cached arrays (e.g. loaded vertex_normals), which Vector3dVector rejects.
+        # copy=True: trimesh sometimes hands back read-only arrays, which Vector3dVector rejects.
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(np.array(self.vertices, dtype=np.float64, copy=True))
         mesh.triangles = o3d.utility.Vector3iVector(np.array(self.faces, dtype=np.int32, copy=True))

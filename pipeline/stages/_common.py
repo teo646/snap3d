@@ -1,9 +1,5 @@
-"""Shared plumbing for every stage wrapper: input hashing + manifest writing.
-
-A stage wrapper reads directories satisfying a `schemas/` contract, calls the matching
-`core/` algorithm, writes the result out, and records a manifest; this factors out the
-last two parts. Caching (skipping a stage whose manifest matches) is the orchestrator's
-job, not a wrapper's - invoked directly, a stage always runs.
+"""Shared plumbing for every stage wrapper: input hashing + manifest writing. Caching is the
+orchestrator's job; invoked directly, a stage always runs.
 """
 
 from __future__ import annotations
@@ -46,10 +42,8 @@ def finalize_stage(
 
 
 def stage_cli(stage_module_name: str, run_fn: StageRunFn) -> None:
-    """Standard `python -m pipeline.stages.<stage>.run` CLI: parse repeated
-    `--input name=path` flags, `--output <dir>`, and an optional `--params <json>`,
-    then call `run_fn`. Lets any stage be run/debugged in isolation from the
-    orchestrator."""
+    """Standard `python -m pipeline.stages.<stage>.run` CLI: repeated `--input name=path`,
+    `--output <dir>`, optional `--params <json>`, then calls `run_fn`."""
     parser = argparse.ArgumentParser(description=f"Run the {stage_module_name} stage")
     parser.add_argument(
         "--input", action="append", default=[], metavar="NAME=PATH", help="repeatable: logical_name=path"

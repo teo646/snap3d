@@ -1,7 +1,5 @@
-"""Internal helpers shared by ingest.py and resize_dataset.py: run the `colmap`
-CLI as a subprocess and parse its TXT model format. Not a public core module on its
-own - both wrap COLMAP but produce different schema outputs (posed_images vs.
-undistorted images + camera model), so the shared plumbing lives here.
+"""Internal helpers shared by ingest.py and resize_dataset.py: run the `colmap` CLI as a
+subprocess and parse its TXT model format.
 """
 
 from __future__ import annotations
@@ -54,9 +52,7 @@ def convert_model_to_txt(binary: str, model_dir: Path, out_dir: Path | None = No
 
 
 def pick_largest_model(sparse_dir: Path) -> Path:
-    """COLMAP's mapper may reconstruct several disconnected models (0/, 1/, ...)
-    when the image set doesn't fully connect; we pick the one with the largest
-    points3D.bin as a cheap proxy for "most complete reconstruction"."""
+    """Picks the mapper model (0/, 1/, ...) with the largest points3D.bin."""
     model_dirs = [p for p in sparse_dir.iterdir() if p.is_dir() and (p / "points3D.bin").exists()]
     if not model_dirs:
         raise ColmapError(f"No reconstructed model found under {sparse_dir}")
@@ -77,13 +73,11 @@ def parse_cameras_txt(path: Path) -> dict[int, CameraIntrinsics]:
 
 
 def parse_images_txt(path: Path) -> tuple[list[PosedImage], dict[int, list[tuple[float, float, int]]]]:
-    """Returns (posed_images, points2d_by_image_id). points2d entries are
-    (x, y, point3d_id); point3d_id == -1 means unmatched to any 3D point."""
+    """Returns (posed_images, points2d_by_image_id). points2d entries are (x, y, point3d_id);
+    point3d_id == -1 means unmatched."""
     images: list[PosedImage] = []
     points2d_by_image: dict[int, list[tuple[float, float, int]]] = {}
-    # Only comment lines are dropped here - NOT blank lines, since an image with zero
-    # POINTS2D observations legitimately has a blank second line, and dropping it would
-    # desync the header/points2d alternation for every image after it.
+    # Only comment lines are dropped, not blank lines: an image with zero POINTS2D has a blank second line.
     lines = [l for l in path.read_text().splitlines() if not l.lstrip().startswith("#")]
     for i in range(0, len(lines), 2):
         header = lines[i].split()
@@ -160,17 +154,8 @@ def convert_model_to_bin(binary: str, txt_dir: Path, out_dir: Path | None = None
 def write_colmap_text_model(
     model_dir: Path, posed_images: PosedImageSet, point_cloud: PointCloud | None
 ) -> None:
-    """Serializes a PosedImageSet (+ optional sparse PointCloud) back into COLMAP's
-    TXT model format, so downstream stages (resize_dataset.py) can feed them into
-    COLMAP tools like `image_undistorter` without depending on any ingest-internal
-    artifacts.
-
-    POINTS2D[]/TRACK[] entries are populated from `point_cloud.track_image_ids` /
-    `track_pixels` when available. This matters even though MVS itself only reads
-    poses/intrinsics: `patch_match_stereo`'s `__auto__` neighbor selection determines
-    each image's "source images" from shared 3D point covisibility, so an empty
-    points model makes every image believe it has no neighbors and silently produces
-    zero depth maps.
+    """Serializes a PosedImageSet (+ optional sparse PointCloud) back into COLMAP's TXT model
+    format. POINTS2D[]/TRACK[] are populated from the point cloud's tracks when available.
     """
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,8 +165,7 @@ def write_colmap_text_model(
         cameras_lines.append(f"{camera_id} {cam.model} {cam.width} {cam.height} {params_str}")
     (model_dir / "cameras.txt").write_text("\n".join(cameras_lines) + "\n")
 
-    # Invert point_cloud's per-point tracks into per-image POINTS2D lists, and record
-    # each point's TRACK[] as (image_id, point2d_idx) pairs referencing those lists.
+    # Invert per-point tracks into per-image POINTS2D lists and per-point TRACK[] pairs.
     points2d_by_image: dict[int, list[tuple[float, float, int]]] = {
         img.image_id: [] for img in posed_images.images
     }

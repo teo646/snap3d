@@ -1,29 +1,15 @@
 """Keep a fitted SH texture map inside the colours each texel was actually seen with.
 
-The slf fit is plain least squares over the view directions a texel was photographed
-from, and least squares extrapolates: a view trend seen from 0-20 degrees keeps
-climbing past the last observation on one side and falls below the darkest one on the
-other. Every direction a renderer can look from maps onto the whole HSH sphere
-(sh_math.hsh_remap), so that extrapolation is always reachable - it shows as texels
-glowing or going black at angles the capture never covered.
+The slf fit is least squares and extrapolates beyond the observed view directions, which shows
+as glowing or black texels at unseen angles. This re-fits each texel, per channel, so its
+function's range lies in [min observed - tol, max observed + tol] clamped to [0, 1], from the
+normal equations and observed range slf saved (slf_fit.run_slf_fit's fit_stats_path).
 
-This re-fits each texel, per channel, under the constraint that its function's whole
-range lies in [min observed - tol, max observed + tol], clamped to [0, 1]. It works
-from what slf saved (slf_fit.run_slf_fit's fit_stats_path) - the per-texel normal
-equations and observed range - so no photo is read again, and the least-squares
-objective is the one the fit minimised, not a Euclidean distance between coefficient
-vectors.
+  * Degree 1 (default): the range is exactly [a - |b|, a + |b|]; see _bound_degree1_range.
+  * Texels slf flattened to a degree-0 average, and degree 0 maps: clamp a.
+  * Degree 2 and up: rejected.
 
-  * Degree 1 (the default): the range is exactly [a - |b|, a + |b|]; see
-    _bound_degree1_range for the closed-form re-fit.
-  * Texels slf flattened to a degree-0 average (too few views), and degree 0 maps:
-    the function is the constant a, so bounding it is clamping a.
-  * Degree 2 and up: the range of a quadratic on the sphere has no closed form here;
-    rejected rather than approximated.
-
-Coefficient padding (the nearest-copy fill slf gives unobserved-but-valid texels so
-GL_LINEAR does not bleed black) is redone from the bounded coefficients, using the
-source map slf recorded.
+Coefficient padding is redone from the bounded coefficients using slf's recorded source map.
 """
 
 from __future__ import annotations
@@ -44,8 +30,7 @@ _C1 = 0.4886025119029199
 
 @dataclass
 class SLFBoundConfig:
-    # How far outside its observed colours a texel's function may reach, in [0, 1]
-    # colour units (0.02 is about 5 steps of 8-bit).
+    # How far outside its observed colours a texel's function may reach, in [0, 1] colour units.
     range_tolerance: float = 0.02
     device: str = "cuda"
 
@@ -55,23 +40,14 @@ def _bound_degree1_range(
 ) -> tuple[torch.Tensor, int]:
     """Re-fit degree-1 SH coefficients so each texel's function stays inside [lo, hi].
 
-    AtA (N, 4, 4) with the ridge already on its diagonal, Atb (N, 4, 3), coeffs
-    (N, 4, 3) the unconstrained solve, lo/hi (N, 3). Returns (coeffs, how many
-    texel-channels changed).
+    AtA (N, 4, 4) with the ridge on its diagonal, Atb (N, 4, 3), coeffs (N, 4, 3) the
+    unconstrained solve, lo/hi (N, 3). Returns (coeffs, texel-channels changed).
 
-    Degree 1 on the HSH-remapped direction d' is linear: f(d) = a + b.d' with
-    a = C0*c0 and b = C1*(-c3, -c1, c2). Every view a renderer can take maps onto the
-    whole unit sphere of d', so the range is exactly [a - |b|, a + |b|], and staying
-    inside [lo, hi] is two conditions: a + |b| <= hi and a - |b| >= lo.
-
-    Minimising the least-squares objective c^T AtA c - 2 Atb^T c under those is a
-    second-order-cone program. Here the direction of b is held at the unconstrained
-    fit's and only the DC and |b| are re-solved: c = alpha*e0 + beta*w with w the unit
-    direction of (c1, c2, c3). That leaves a 2-variable quadratic over a triangle -
-    beta >= 0, C0*alpha + C1*beta <= hi, C0*alpha - C1*beta >= lo - whose minimum is
-    either the unconstrained 2-D optimum, if it lies inside, or the best of the three
-    edge minima. Where the unconstrained fit already stays in range, it is returned
-    unchanged.
+    f(d) = a + b.d' with a = C0*c0, b = C1*(-c3, -c1, c2), so the range is [a - |b|, a + |b|].
+    The direction of b is held at the unconstrained fit's and only the DC and |b| are re-solved:
+    a 2-variable quadratic over the triangle beta >= 0, C0*alpha + C1*beta <= hi,
+    C0*alpha - C1*beta >= lo, minimised at the interior optimum or the best edge minimum.
+    Texels already in range are unchanged.
     """
     C0, C1 = _C0, _C1
     out = coeffs.clone()
@@ -90,8 +66,7 @@ def _bound_degree1_range(
         idx = torch.nonzero(needs, as_tuple=True)[0]
         M, gi, vi, vn = AtA[idx], g[idx], v[idx], v_norm[idx]
         lo_i, hi_i = lo_c[idx], hi_c[idx]
-        # A texel whose lower bound crossed its upper one (a single dark observation
-        # plus a large tolerance clamped at 1, say) gets the midpoint, flat.
+        # lo crossed hi: take the midpoint, flat.
         hi_i = torch.maximum(hi_i, lo_i)
 
         w = torch.zeros(len(idx), 4, device=c.device, dtype=c.dtype)
@@ -112,7 +87,7 @@ def _bound_degree1_range(
             eps = 1e-6
             return (fr >= -eps) & (fa + fr <= hi_i + eps) & (fa - fr >= lo_i - eps)
 
-        # Triangle corners in (alpha, beta): r = 0 at a = lo and a = hi, and the apex.
+        # Triangle corners in (alpha, beta).
         v1 = torch.stack([lo_i / C0, torch.zeros_like(lo_i)], dim=1)
         v2 = torch.stack([hi_i / C0, torch.zeros_like(hi_i)], dim=1)
         v3 = torch.stack([(lo_i + hi_i) / (2 * C0), (hi_i - lo_i) / (2 * C1)], dim=1)
@@ -172,7 +147,7 @@ def bound_sh_texture_map(
         flat_rows = under
     else:
         flat_rows = torch.ones_like(under)
-    # Constant functions: the range is the single value a = C0 * c0; clamp it.
+    # Constant functions: clamp a = C0 * c0.
     a = _C0 * coeffs[flat_rows, 0, :]
     a_clamped = torch.minimum(torch.maximum(a, lo[flat_rows]), hi[flat_rows])
     n_flat = int((a_clamped != a).sum())

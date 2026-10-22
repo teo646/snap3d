@@ -1,22 +1,15 @@
 """Runs a full pipeline from a YAML config: `python -m pipeline.orchestrator.runner \
     --config pipeline/orchestrator/configs/photo_pipeline.yaml --input <photo_dir>`.
 
-The YAML's `stages` list is the *only* source of ordering/wiring - nothing here is
-hardcoded to a particular sequence, so a config can declare a different stage list
-without touching this file.
-
-Each stage entry:
+Each stage entry in the YAML's `stages` list:
     id: <str>                      # also used for the "NN_<id>" run directory name
     module: <dotted.module.path>   # must expose run(input_dirs, output_dir, params) -> StageManifest
     uses_source_input: <bool>      # if true, gets the CLI --input path as input_dirs["source"]
-    inputs: {name: stage_id, ...}  # name -> resolved to that earlier stage's output dir
-    params: {...}                  # passed straight through to the stage's core Config
+    inputs: {name: stage_id, ...}  # name -> that earlier stage's output dir
+    params: {...}                  # passed through to the stage's core Config
 
-`--text` is a special case: the SAM3 prompt names whatever object this capture
-contains, so it is a CLI argument rather than a YAML param. It is the `text_prompt` of
-every masking stage that does not set its own (a pipeline may segment several times).
-A masking stage with neither is skipped, for a capture with no background to strip.
-
+`--text` is the SAM3 prompt, used as the `text_prompt` of every masking stage that sets none. A
+masking stage with neither is skipped.
 """
 
 from __future__ import annotations
@@ -33,8 +26,7 @@ import yaml
 from pipeline.schemas.manifest import read_manifest
 from pipeline.stages._common import compute_input_hashes
 
-# Stages running this module get the CLI --text prompt unless they set their own (see
-# the module docstring).
+# Stages that get the CLI --text prompt unless they set their own.
 _MASKING_MODULES = ("pipeline.stages.masking.run",)
 
 
@@ -63,10 +55,7 @@ def run_pipeline(
         stage_dir = run_dir / f"{i + 1:02d}_{stage_id}"
         params = stage_cfg.get("params", {})
         if stage_cfg["module"] in _MASKING_MODULES:
-            # SAM3 needs a text prompt to segment anything, and there is no sensible
-            # default for "what is the object in this capture". No --text therefore
-            # means "this capture doesn't need segmenting" - one with no background to
-            # strip. The stage is skipped rather than run with an empty prompt.
+            # No prompt means the capture needs no segmenting; skip the stage.
             prompt = params.get("text_prompt") or text_prompt
             if not prompt:
                 print(f"[{i + 1:02d}/{len(stages)}] {stage_id}: skipped (no --text prompt given)")

@@ -26,18 +26,11 @@ _SELF_HIT_EPS_SCALE = 1e-6
 @dataclass
 class BakingConfig:
     search_distance: float | None = None  # None -> 5% of the high-poly mesh's bbox extent
-    # Gutter width in texels. This is the radius actually written, and - since
-    # slf_fit's rasterize_uv_atlas is handed this HeightMap's `valid` - the one the
-    # whole downstream uses. Keep equal to UVUnwrapConfig.gutter_texels, which reserves
-    # the matching space at pack time.
+    # Gutter width in texels; keep equal to UVUnwrapConfig.gutter_texels.
     gutter_texels: int = GUTTER_TEXELS
-    # A height map of all zeros over the same coverage, without casting a ray: the low-poly surface
-    # itself, no displacement. For fitting the SLF on the proxy alone, to see what the baked height buys.
+    # A height map of zeros over the same coverage, without casting a ray.
     flat: bool = False
-    # Clip the baked heights to +- this percentile of their magnitudes (None: keep all). The march slab
-    # every consumer uses is max|h| * 1.15, and the few texels whose ray hit a far surface sit at the
-    # search distance (5% of the extent) - typically 20-1000x the 99th percentile - so a handful of
-    # outliers can set a slab the real relief is a tiny fraction of.
+    # Clip baked heights to +- this percentile of their magnitudes (None: keep all).
     clip_percentile: float | None = None
 
 
@@ -47,9 +40,6 @@ class _Raster(NamedTuple):
     valid: np.ndarray  # (H, W) bool — core coverage, BEFORE dilation
 
 
-# --------------------------------------------------------------------------- #
-# main entry point
-# --------------------------------------------------------------------------- #
 
 
 def run_baking(highpoly: Mesh, uv_mesh: UVMesh, config: BakingConfig | None = None) -> HeightMap:
@@ -77,8 +67,7 @@ def run_baking(highpoly: Mesh, uv_mesh: UVMesh, config: BakingConfig | None = No
 
     found, loc = _cast_rays_bidirectional(highpoly_tm, tex_pos, tex_nrm, search_distance, self_hit_eps)
 
-    # Signed distance along the low-poly normal: positive = high-poly sits
-    # outside the low-poly surface, negative = inside.
+    # Signed distance along the low-poly normal: positive = high-poly outside.
     height_vals = np.zeros(len(tex_pos), dtype=np.float64)
     height_vals[found] = np.einsum("ij,ij->i", loc[found] - tex_pos[found], tex_nrm[found])
     if config.clip_percentile is not None and found.any():
@@ -91,9 +80,7 @@ def run_baking(highpoly: Mesh, uv_mesh: UVMesh, config: BakingConfig | None = No
     hit_mask = np.zeros((h, w), dtype=bool)
     hit_mask[ys[found], xs[found]] = True
 
-    # Texels whose ray found nothing inherit height from the nearest texel that
-    # did hit, so the transition stays continuous, before falling back to the
-    # zero-height default outside all coverage.
+    # Texels whose ray found nothing inherit height from the nearest hit texel.
     if hit_mask.any() and not hit_mask[raster.valid].all():
         src = _nearest_source_indices(hit_mask)
         holes = raster.valid & ~hit_mask
@@ -106,16 +93,11 @@ def run_baking(highpoly: Mesh, uv_mesh: UVMesh, config: BakingConfig | None = No
     return HeightMap(data=height_map, valid=coverage, units="scene")
 
 
-# --------------------------------------------------------------------------- #
-# UV rasterization
-# --------------------------------------------------------------------------- #
 
 
 def _rasterize_uv_mesh(uv_mesh: UVMesh) -> _Raster:
-    """Scanline-rasterize each UV-space triangle, barycentric-interpolating 3D
-    position / normal per texel. `valid` is the *core* coverage; the gutter is
-    added later in `run_baking` so that ray casting isn't duplicated across a
-    texel and its dilated copies."""
+    """Scanline-rasterize each UV-space triangle, interpolating 3D position / normal per texel.
+    `valid` is the core coverage; the gutter is added later in `run_baking`."""
     w, h = uv_mesh.texture_resolution
     positions = np.zeros((h, w, 3), dtype=np.float64)
     normals = np.zeros((h, w, 3), dtype=np.float64)
@@ -126,10 +108,7 @@ def _rasterize_uv_mesh(uv_mesh: UVMesh) -> _Raster:
     if vertex_normals is None:
         vertex_normals = Mesh(vertices=verts, faces=faces).to_trimesh().vertex_normals
 
-    # Must match uv_geometry.uv_to_atlas_xy and slf_shaders.uv_to_xy exactly: this
-    # HeightMap is sampled with texture() during both the fit's march and rendering, so
-    # a different formula misaligns height against position/normal by up to half a
-    # texel - worst at the seam between chart data and its gutter copy.
+    # Must match uv_geometry.uv_to_atlas_xy and slf_shaders.uv_to_xy exactly.
     px = uv[:, 0] * w - 0.5
     py = (1.0 - uv[:, 1]) * h - 0.5  # UV origin is bottom-left; image row 0 is the top
 
@@ -156,9 +135,7 @@ def _rasterize_uv_mesh(uv_mesh: UVMesh) -> _Raster:
         inside = (w0 >= eps) & (w1 >= eps) & (w2 >= eps)
 
         if not np.any(inside):
-            # Sliver triangle: thinner than one texel, so it contains no texel
-            # center. Claim the texel nearest its centroid instead of dropping
-            # it — otherwise the atlas interior ends up speckled with holes.
+            # Sliver triangle containing no texel center: claim the texel nearest its centroid.
             cx = int(round((x0 + x1 + x2) / 3.0))
             cy = int(round((y0 + y1 + y2) / 3.0))
             if 0 <= cx < w and 0 <= cy < h and not valid[cy, cx]:
@@ -187,9 +164,6 @@ def _rasterize_uv_mesh(uv_mesh: UVMesh) -> _Raster:
     return _Raster(positions, normals, valid)
 
 
-# --------------------------------------------------------------------------- #
-# ray casting
-# --------------------------------------------------------------------------- #
 
 
 def _cast_rays_bidirectional(
@@ -199,10 +173,8 @@ def _cast_rays_bidirectional(
     max_distance: float,
     self_hit_eps: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Cast outward (+n) and inward (-n) from each texel up to `max_distance`, keeping
-    whichever hit is closest. Bounded on purpose: casting from `pos + n*d` toward `-n`
-    is unbounded, so a texel over a hole in the high-poly mesh hits the far side of the
-    object and records a height on the order of its diameter."""
+    """Cast outward (+n) and inward (-n) from each texel up to `max_distance`, keeping the closest
+    hit. Bounded so a texel over a hole in the high-poly mesh does not hit the far side."""
     n = len(pos)
     found = np.zeros(n, dtype=bool)
     best_loc = np.zeros((n, 3), dtype=np.float64)
@@ -212,14 +184,7 @@ def _cast_rays_bidirectional(
         return found, best_loc
 
     for direction_sign in (1.0, -1.0):
-        # Each ray starts `self_hit_eps` *behind* the texel, against its own direction,
-        # so a surface that passes through the texel itself (or within eps of it) is
-        # still ahead of the origin. Starting ahead - the natural-looking choice - makes
-        # both rays miss a surface closer than eps, which is most of a low-poly mesh
-        # whose vertices sit on the high-poly one: the inward ray then runs on to the far
-        # wall and records a height of tens of percent of the search distance. The mesh
-        # being cast against is the high-poly one, not the one the texel sits on, so a
-        # hit at distance ~0 is a real hit, not a self-intersection.
+        # Each ray starts `self_hit_eps` behind the texel so a surface through the texel is still ahead.
         origins = pos - nrm * (direction_sign * self_hit_eps)
         directions = nrm * direction_sign
         f, loc = _cast_rays_nearest(mesh, origins, directions, max_distance + self_hit_eps)
@@ -241,9 +206,7 @@ def _cast_rays_nearest(
     directions: np.ndarray,
     max_distance: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-ray nearest hit within `max_distance`. `multiple_hits=False` is not
-    reliably supported by trimesh's pure-numpy backend, so all hits are reduced here.
-    Batched to bound peak memory."""
+    """Per-ray nearest hit within `max_distance`, batched to bound peak memory."""
     n = len(origins)
     hit_found = np.zeros(n, dtype=bool)
     hit_location = np.zeros((n, 3), dtype=np.float64)
@@ -282,9 +245,6 @@ def _cast_rays_nearest(
     return hit_found, hit_location
 
 
-# --------------------------------------------------------------------------- #
-# gutter dilation
-# --------------------------------------------------------------------------- #
 
 
 def _nearest_source_indices(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -296,9 +256,8 @@ def _nearest_source_indices(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _dilate_nearest(
     layers: list[np.ndarray], valid: np.ndarray, radius: int
 ) -> tuple[np.ndarray, ...]:
-    """Extend each layer `radius` texels outside `valid` by copying the nearest valid
-    texel's value (never averaging - across a chart-gutter collision an average would
-    blend two unrelated surfaces). Returns the layers, then the dilated mask."""
+    """Extend each layer `radius` texels outside `valid` by copying the nearest valid texel's
+    value (never averaging). Returns the layers, then the dilated mask."""
     if not valid.any() or radius <= 0:
         return (*layers, valid.copy())
 
@@ -314,9 +273,6 @@ def _dilate_nearest(
     return (*out, valid | ring)
 
 
-# --------------------------------------------------------------------------- #
-# small helpers
-# --------------------------------------------------------------------------- #
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:

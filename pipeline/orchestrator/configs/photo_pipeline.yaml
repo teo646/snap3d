@@ -1,38 +1,5 @@
-# Photo-input pipeline. Fast-PGSR (FastGS-accelerated PGSR, third_party/FastGS on its
-# `fast-pgsr` branch) is the surface_recon path: it trains and renders directly on posed
-# images, so the old COLMAP dense-stereo mvs stage and Poisson surface_recon are gone.
-# Planar Gaussians fused through TSDF, largest connected component only, ~20 minutes. Its TSDF mesh is
-# full-resolution (millions of triangles), so decimation -> uv_unwrap -> baking still
-# follow: a lowpoly proxy xatlas can unwrap, then a baseline height_map ray-cast from
-# the highpoly mesh against that atlas.
-#
-# `masking` runs *after* `resize_dataset` so SAM3 segments the exact images Fast-PGSR uses
-# and there is no resolution mismatch to reconcile (resize_dataset's max_image_size can
-# downscale). Its `posed_images` still comes from ingest - resize_dataset does not
-# reconstruct that schema.
-#
-# surface_recon trains on masking's background-cut `images/`, not resize_dataset's raw
-# frames (`write_masked_images`/`surface_recon_fastpgsr`) - the default as of
-# p2/p3/p4. FastGS/PGSR's L1+SSIM+multi-view losses are computed over the entire frame, so
-# on a capture where the object is a small fraction of each photo most of that loss is
-# spent fitting a background that usually isn't even geometrically consistent between
-# views. Measured on p2 (object a median 7.8% of frame): the unmasked default
-# reconstructed one large warped sheet (bbox ~1.8x1.2x0.6m) instead of the object;
-# replacing the background with the render background colour fixed it. See
-# pipeline/stages/surface_recon_fastpgsr/run.py's docstring for the tradeoffs
-# this brings (a hard edge at the silhouette, mitigated by `mask_dilation_px`'s margin).
-#
-# The photometric losses deliberately stay full-frame. Cutting them to the mask was tried
-# (p3_masked_loss) and is strictly worse: a black background only constrains rendered
-# *colour*, so once the loss stops looking there nothing opposes geometry in the
-# background at all - and none of FastGS's pruning passes close the gap, because every one
-# of them (multi-view trim's `out_observe`, `densify_and_prune_fastgs`'s importance and
-# pruning scores) asks whether a Gaussian was *rendered*, not whether it was penalised. A
-# background Gaussian is rendered in every view, so it survives all of them. Measured on
-# p3: 26k Gaussians -> 107k, highpoly 1.5M -> 3.4M verts, bbox 1.61x1.55x1.06 -> 1.97x2.09x1.34.
-# `lambda_mask_alpha` below is the correct form of the same idea - supervise the
-# silhouette through accumulated alpha, which penalises background *geometry* directly,
-# while the photometric terms keep their stock full-frame balance.
+# Photo-input pipeline: COLMAP SfM -> SAM3 masking -> Fast-PGSR surface reconstruction
+# (third_party/FastGS) -> hole closing -> decimation -> UV unwrap -> baking -> SLF fit -> export.
 #
 # Run with:
 #   python -m pipeline.orchestrator.runner \
@@ -40,10 +7,9 @@
 #       --input /path/to/photo/dir \
 #       --text "object description for SAM3"
 #
-# surface_recon shells out to a dedicated `fastgs` conda env, cloned from `pgsr` for its
-# torch/CUDA build. The separate env is required, not tidiness: FastGS and PGSR both ship
-# packages named diff-plane-rasterization, fused-ssim and simple-knn with different
-# sources, so sharing an environment silently swaps one repo's rasterizer for the other's.
+# masking runs after resize_dataset so SAM3 segments the exact images Fast-PGSR trains on.
+# surface_recon trains on masking's background-cut images and supervises the silhouette through
+# `lambda_mask_alpha`. surface_recon runs in the separate `fastgs` conda env.
 
 run_id_prefix: photo
 
@@ -73,17 +39,11 @@ stages:
     inputs:
       images: resize_dataset
     params:
-      # text_prompt comes from the CLI's --text (SAM3).
+      # text_prompt comes from the CLI's --text.
       images_subdir: _workspace/dense/images
-      # Also write a masked-background `images/` folder for surface_recon to train on -
-      # see this stage's module docstring for why this is a pixel cut, not an alpha
-      # channel (FastGS/PGSR's training loss never reads Camera.mask).
+      # Also write a masked-background `images/` folder for surface_recon to train on.
       write_masked_images: true
-      # Margin kept around the raw SAM3 silhouette before the cut. 0: compared against
-      # 12 on p3, no measured benefit from the extra margin on these captures - SAM3's
-      # own boundary was tight enough that the wider cut wasn't earning back what it
-      # cost (more real object edge pixels sacrificed as margin). Revisit per-capture if
-      # a specific SAM3 mask turns out too tight and clips real silhouette.
+      # Margin kept around the SAM3 silhouette before the cut.
       mask_dilation_px: 0
       mask_fill_color: [0, 0, 0]
 
@@ -98,8 +58,7 @@ stages:
       voxel_size: 0.002
       use_depth_filter: true
       mask_dilation_px: 1
-      # The nine parameters FastGS adds to PGSR, at the values upstream's run_tnt.py
-      # uses - the only invocation its authors publish for this branch.
+      # FastGS parameters (upstream's run_tnt.py values).
       ncc_scale: 0.5
       opacity_cull_threshold: 0.05
       exposure_compensation: true
@@ -107,22 +66,8 @@ stages:
       highfeature_lr: 0.02
       grad_abs_thresh: 0.0004
       mult: 0.7
-      # Upstream declares this (10000) but its train.py never reads it, so the multi-view
-      # loss otherwise stays on from 7000 to the last iteration. Wired in the FastGS patch;
-      # on boots it cut training from 50:00 to 20:23 with an equivalent mesh.
       multi_view_weight_until_iter: 10000
-      # Weight on |rendered_alpha - mask| over the whole frame, wired by the FastGS patch
-      # and only active when the training images carry alpha (i.e. under
-      # surface_recon_fastpgsr). This is what makes "no object here" mean "no
-      # geometry here" - see the header comment for why the photometric losses are the
-      # wrong place to express it. Applies from single_view_weight_from_iter (7000), when
-      # the plane rasterizer that produces rendered_alpha switches on; before that the
-      # background-coloured training pixels carry it. 0.5 against image_loss's 1.0:
-      # measured on p3 against the same config at 0.0, 26k Gaussians and 1.47M highpoly
-      # verts (bbox 1.61x1.55x1.06) became 30k and 1.32M (bbox 1.21x1.53x0.90), i.e. a
-      # tighter object for the same budget. Not swept; raise it if backdrop geometry
-      # survives, lower it if the silhouette comes out inflated (the term also pushes
-      # alpha to 1 *inside* the mask, so it fights a mask that clips real object edge).
+      # Weight on |rendered_alpha - mask|, applied from iteration 7000.
       lambda_mask_alpha: 0.5
 
   - id: hole_close
@@ -130,8 +75,7 @@ stages:
     inputs:
       mesh: surface_recon
     params:
-      # PyMeshLab maxholesize in boundary edges; bigger holes stay open so unobserved
-      # regions are not covered with invented geometry. 0 = pass-through.
+      # PyMeshLab maxholesize in boundary edges; 0 = pass-through.
       max_hole_size: 500
 
   - id: decimation
@@ -146,9 +90,6 @@ stages:
     inputs:
       mesh: decimation
     params:
-      # 1024. Swept on a synthetic benchmark (no longer in this repo); scan6's own
-      # peak was 1536^2 and it pays 0.21 dB here; raise it for a high-resolution
-      # capture with the object filling the frame.
       texture_resolution: [1024, 1024]
       margin_texels: 2
 
@@ -158,7 +99,7 @@ stages:
       highpoly_mesh: hole_close
       uv_mesh: uv_unwrap
     params:
-      gutter_texels: 1  # must equal uv_unwrap's: that reserves the space, this fills it
+      gutter_texels: 1  # must equal uv_unwrap's
 
   - id: slf
     module: pipeline.stages.slf.run
@@ -166,34 +107,19 @@ stages:
       posed_images: ingest
       uv_mesh: uv_unwrap
       height_map: baking
-      masking: masking           # the object's silhouette per view; observations outside it are dropped
+      masking: masking           # observations outside the object's silhouette are dropped
       highpoly_mesh: hole_close  # reference depth when depth_reference is highpoly
       gaussians: surface_recon   # reference depth when depth_reference is gaussians
     params:
-      # Drop a pixel when the surface its resolved uv stands for sits at a different
-      # depth than the high-poly mesh at that pixel, by more than this fraction of that
-      # depth. Decimation moves silhouettes, so where one part of the object overlaps
-      # another the front part's edge pixels rasterize onto the back part; POM moves a
-      # pixel along a surface but never onto a different one. Measured on boots (114
-      # views): median disagreement 0.004%, p99 0.33%, then a long tail to 100%; 0.5%
-      # sits past the knee and rejects 0.9% of resolved pixels - lace and cuff edges,
-      # silhouette fringe, and spots where the baked height is wrong.
+      # Drop a pixel when its surface depth differs from the reference depth by more than this fraction.
       depth_test_tolerance: 0.005
-      # Against the trained Gaussians' own depth maps rather than the fused mesh: the
-      # mesh's 2 mm TSDF voxels erase fibres and thin rim edges, so a photo pixel that
-      # shows one over the lining behind still depth-tests as lining and passes.
       depth_reference: gaussians
-      # 1 (4 coeffs/channel). Viable this low because of the HSH hemisphere remap,
-      # which gets more detail per coefficient than full-sphere SH - see sh_math.py.
       sh_degree: 1
       min_observations_per_texel: 3
       ridge: 1.0e-4
       num_steps: 7  # match view_slf.py's --num-steps default
-      # 0.0: this threshold is resolution-sensitive, and the ridge domination it used
-      # to guard against is handled by min_precision_ridge_ratio instead.
       recon_min_precision: 0.0
-      # Reject texels whose total precision is under ridge * this: their solve is
-      # ridge-dominated and renders near-black along chart borders.
+      # Reject texels whose total precision is under ridge * this.
       min_precision_ridge_ratio: 10.0
       border_margin_frac: 0.0  # exclude the outer N% of each photo from sampling; 0 = off
       device: cuda
@@ -203,27 +129,17 @@ stages:
     inputs:
       slf: slf
     params:
-      # Keep each texel's fitted function inside the colours it was seen with, +- this,
-      # clamped to [0, 1]. Least squares otherwise extrapolates its linear view trend
-      # past the observed angles - brighter than any photo on one side, darker (even
-      # negative) on the other - and every render direction can reach it. A separate
-      # stage so this can be retuned without re-running slf's fit over every photo.
+      # Keep each texel's fitted function inside its observed colours +- this, clamped to [0, 1].
       range_tolerance: 0.02
 
   - id: export
     module: pipeline.stages.export.run
     inputs:
-      posed_images: ingest  # only to aim the initial view; no pixels are read
+      posed_images: ingest  # only to aim the initial view
       uv_mesh: uv_unwrap
       slf: slf_bound
-    # Render-ready <run_id>_unorm8.snap3d/ and <run_id>_float16.snap3d/ folders (both are written; there is
-    # no storage option): mesh.glb, sh.ktx2, height.ktx2 and the
-    # constants a renderer cannot infer (up axis, sh degree, parallax slab, initial
-    # camera). Defaults reproduce the interactive viewer's opening view.
+    # Writes <run_id>_unorm8.snap3d/ and <run_id>_float16.snap3d/ (see pipeline/core/render_bundle.py).
     params:
-      # Two lossy cuts that only make the float16 coefficients compressible; both are
-      # stated rather than defaulted so the manifest cache sees a change to either.
-      # Coefficient k is flattened to zero below step * k (~8% of the file), then every
-      # coefficient keeps 5 of float16's 10 mantissa bits (a further ~38%).
+      # float16 bundle only: zero coefficient k below step * k, keep 5 of float16's 10 mantissa bits.
       sh_zero_threshold_step: 0.015
-      sh_mantissa_bits: 5  # float16 bundle only
+      sh_mantissa_bits: 5

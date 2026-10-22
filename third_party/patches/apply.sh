@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# Apply this repo's patches to the third-party submodules.
-#
-# The submodules are pinned to their upstream commits and their working trees are
-# patched in place - the superproject records only a commit SHA, so nothing under
-# third_party/<name>/ is version-controlled here. These .patch files are, and this
-# script is what turns a fresh `git submodule update --init` into a working checkout.
-#
-# Each patch's base commit is asserted before it is applied: a patch built against a
-# different revision would either fail loudly or, worse, apply to the wrong lines.
+# Apply this repo's patches to the third-party submodules, which are pinned to upstream commits.
+# Each patch's base commit is asserted before it is applied.
 #
 #   ./third_party/patches/apply.sh          # apply
 #   ./third_party/patches/apply.sh --check  # report whether each is already applied

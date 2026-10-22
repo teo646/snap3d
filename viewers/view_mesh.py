@@ -1,23 +1,14 @@
 #!/usr/bin/env python
-"""Interactive viewer for the pipeline's .obj meshes, wrapping open3d's built-in
-visualizer (already a base dependency). Reads via o3d.io.read_triangle_mesh, so a
-UV-textured mesh shows its texture and a vertex-coloured one its colours.
+"""Interactive viewer for the pipeline's .obj meshes, wrapping open3d's visualizer.
 
 Usage:
     python viewers/view_mesh.py data/runs/apple_test/06_uv_unwrap/mesh_uv.obj
+    python viewers/view_mesh.py A.obj B.obj --compare   # side by side, offset along X
+    python viewers/view_mesh.py mesh_uv.obj --shade     # headlamp Lambertian shading
 
-    # several stages side by side, offset along X:
-    python viewers/view_mesh.py \
-        data/runs/apple_test/03_surface_recon/mesh_highpoly.obj \
-        data/runs/apple_test/05_decimation/mesh_lowpoly.obj --compare
-
-    # headlamp Lambertian shading, to inspect surface detail without texture:
-    python viewers/view_mesh.py data/runs/apple_test/06_uv_unwrap/mesh_uv.obj --shade
-
-Hold E and move the mouse to erase vertices under the cursor; press B to undo, up to
-10 erase steps back (--erase-key/--undo-key/--undo-depth to change any of that). Pass
---save-edit to overwrite each source .obj with its erased mesh on quit (skips files
-nothing was erased from; keeps a one-time .bak of each file it does overwrite).
+Hold E and move the mouse to erase vertices under the cursor; B undoes (--erase-key,
+--undo-key, --undo-depth). --save-edit overwrites each edited .obj on quit, keeping a
+one-time .bak.
 """
 
 from __future__ import annotations
@@ -34,27 +25,21 @@ import open3d as o3d
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Same ambient/diffuse split as the SLF viewer's headlamp shading.
+# Same ambient/diffuse split as the SLF viewer's shading.
 _HEADLAMP_AMBIENT = 0.15
 _HEADLAMP_DIFFUSE = 0.85
 
 
 def _apply_headlamp_shading(vis: o3d.visualization.Visualizer, meshes: list[o3d.geometry.TriangleMesh]) -> None:
-    """Registers a per-frame callback that recolors each mesh by simple Lambertian
-    shading with the light attached to the camera (color = ambient + diffuse *
-    max(0, dot(normal, view_dir)), view_dir recomputed from the live camera position
-    every frame) - a "headlamp": whatever currently faces the viewer is lit,
-    independent of world/mesh orientation. open3d's plain Visualizer has no custom-
-    shader hook, so this is per-vertex rather than per-fragment like the SLF viewer's
-    GLSL version, but it's the same shading model.
-    """
+    """Registers a per-frame callback that recolors each mesh with headlamp Lambertian shading
+    (ambient + diffuse * max(0, dot(normal, view_dir)))."""
     normals = [np.asarray(m.vertex_normals) for m in meshes]
     verts = [np.asarray(m.vertices) for m in meshes]
 
     def _update(vis: o3d.visualization.Visualizer) -> bool:
         extrinsic = vis.get_view_control().convert_to_pinhole_camera_parameters().extrinsic
         R, t = extrinsic[:3, :3], extrinsic[:3, 3]
-        cam_pos = -R.T @ t  # world-space camera position, from the world->camera extrinsic
+        cam_pos = -R.T @ t  # world-space camera position
         for mesh, n, v in zip(meshes, normals, verts):
             view_dir = cam_pos[None, :] - v
             view_dir /= np.linalg.norm(view_dir, axis=1, keepdims=True) + 1e-10
@@ -68,10 +53,8 @@ def _apply_headlamp_shading(vis: o3d.visualization.Visualizer, meshes: list[o3d.
 
 
 def _restore_mesh(mesh: o3d.geometry.TriangleMesh, snapshot: o3d.geometry.TriangleMesh) -> None:
-    """Overwrites every field `remove_vertices_by_mask` could have touched with
-    `snapshot`'s (a `copy.deepcopy` taken before that mutation), in place - `mesh`
-    stays the same object, so it's still the one `meshes`, the visualizer, and
-    `_apply_headlamp_shading`'s closure all hold a reference to."""
+    """Overwrites every field `remove_vertices_by_mask` could have touched with `snapshot`'s,
+    in place."""
     mesh.vertices = snapshot.vertices
     mesh.triangles = snapshot.triangles
     mesh.vertex_normals = snapshot.vertex_normals
@@ -89,32 +72,19 @@ def _register_vertex_eraser(
     undo_key_code: int,
     undo_depth: int,
 ) -> None:
-    """While `key_code` is held, mouse movement erases vertices under the cursor
-    (screen-space brush of radius `radius_px`). Only front-facing vertices are
-    removed (dot(normal, view_dir) > 0.1) so a drag doesn't reach through the mesh
-    to the far side. remove_vertices_by_mask also drops any triangle that
-    referenced a removed vertex and keeps colors/normals/UVs in sync.
+    """While `key_code` is held, mouse movement erases front-facing vertices under the cursor
+    (screen-space brush of radius `radius_px`) and the triangles that use them.
 
-    `undo_key_code` pops the last erase and restores it, up to `undo_depth` steps
-    back. One "step" is one mouse-move callback that erased anything - across
-    however many of `meshes` it touched - so undo reverts them together, matching
-    what a single drag increment did.
+    `undo_key_code` restores the last erase, up to `undo_depth` steps; one step is one
+    mouse-move callback that erased anything.
 
-    open3d's built-in left-drag-rotate is wired through the same MouseMoveCallback
-    this registers a Python handler for, and registering one *replaces* the default
-    rather than layering on top of it - so left-drag orbit and Ctrl+left-drag /
-    right-drag pan stop working the moment any mouse-move callback is registered at
-    all, `key_code` held or not. `_on_mouse_button`/the non-erase branch of
-    `_on_mouse_move` below reimplement both with `ViewControl.rotate`/`.translate`,
-    the same calls open3d's own default handler makes, so dragging feels identical
-    to a plain (uninstrumented) Visualizer except while `key_code` is held.
+    A Python mouse-move callback replaces open3d's default rotate/pan handling, so orbit and
+    pan are reimplemented below with `ViewControl.rotate`/`.translate`.
     """
     state = {"erase_key_down": False}
     history: deque[list[tuple[int, o3d.geometry.TriangleMesh]]] = deque(maxlen=undo_depth)
-    # Left-button drag without the erase key held orbits; Ctrl+left or plain right
-    # pans - open3d's own default bindings. `fresh` skips the first delta after a
-    # press (nothing to diff against yet) and is re-armed when the erase key is
-    # released mid-drag, so a drag interrupted by erasing doesn't jump on resume.
+    # Left drag orbits; Ctrl+left or right drag pans. `fresh` skips the first delta after a
+    # press or after erasing was interrupted.
     _MOUSE_LEFT, _MOUSE_RIGHT, _MOD_CONTROL = 0, 1, 0x0002
     drag = {"button": None, "pan": False, "fresh": False, "last": (0.0, 0.0)}
 
@@ -177,7 +147,7 @@ def _register_vertex_eraser(
             facing = np.einsum("ij,ij->i", n, view_dir) > 0.1
             mask = in_front & within_radius & facing
             if mask.any():
-                step.append((i, copy.deepcopy(mesh)))  # pre-mutation snapshot, for undo
+                step.append((i, copy.deepcopy(mesh)))  # pre-mutation snapshot for undo
                 mesh.remove_vertices_by_mask(mask)
                 vis.update_geometry(mesh)
         if step:
@@ -205,9 +175,7 @@ def _register_vertex_eraser(
     vis.register_key_action_callback(undo_key_code, _on_undo)
 
 
-# Distinct fallback colors applied to each mesh under --compare, since
-# side-by-side comparison is only legible if the meshes don't all render the
-# same flat gray.
+# Fallback colors per mesh under --compare.
 _COMPARE_COLORS = [
     (0.85, 0.15, 0.15),  # red
     (0.15, 0.55, 0.85),  # blue
@@ -292,9 +260,7 @@ def main() -> None:
                       "camera-relative shading every frame, which isn't the mesh's real color")
 
     meshes = [_load(path) for path in args.paths]
-    # Baseline to detect which meshes an erase actually touched (an equal-count mesh is
-    # exactly the loaded one - undo restores original fields, so an erase fully undone
-    # is indistinguishable from never erased, and correctly costs no write below).
+    # Baseline to detect which meshes an erase touched.
     original_counts = [(len(m.vertices), len(m.triangles)) for m in meshes]
 
     if args.compare:
@@ -323,7 +289,7 @@ def main() -> None:
     opt.mesh_show_back_face = True
 
     if args.shade:
-        opt.mesh_color_option = o3d.visualization.MeshColorOption.Color  # else a texture would win over our colors
+        opt.mesh_color_option = o3d.visualization.MeshColorOption.Color
         _apply_headlamp_shading(vis, meshes)
 
     _register_vertex_eraser(

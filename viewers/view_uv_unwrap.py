@@ -1,12 +1,10 @@
 #!/usr/bin/env python
 """Interactive viewer for uv_unwrap's result: the low-poly mesh under a procedural UV
-checkerboard (stretched squares mean the unwrap distorted that region). `--chart-colors`
-flat-colours each chart instead, to inspect seam placement and chart count;
-`--save-uv-layout` writes a flat 2D wireframe of the atlas itself, and `--layout-only`
-does that without opening a window.
+checkerboard (stretched squares mean distortion). `--chart-colors` flat-colours each chart,
+`--save-uv-layout` writes a 2D wireframe of the atlas, and `--layout-only` does that without a window.
 
 Usage:
-    pip install -e ".[viewer]"   # moderngl + pygame, not installed by default
+    pip install -e ".[viewer]"   # moderngl + pygame
     python viewers/view_uv_unwrap.py data/runs/apple_test
     python viewers/view_uv_unwrap.py data/runs/apple_test/06_uv_unwrap/mesh_uv.obj
     python viewers/view_uv_unwrap.py data/runs/apple_test --chart-colors
@@ -25,7 +23,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling _common, however this file is launched
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling _common
 
 from _common import DEFAULT_UP, OrbitCamera, capture_up_vector, perspective  # noqa: E402
 from pipeline.schemas.manifest import read_manifest  # noqa: E402
@@ -84,11 +82,8 @@ void main(){
 
 
 def resolve_mesh_uv_path(run_dir_or_mesh: Path) -> Path:
-    """Accepts either a direct mesh_uv.obj path, a uv_unwrap stage directory, or a
-    whole pipeline run directory (auto-locates the uv_unwrap stage dir within it by
-    reading each subdirectory's manifest.json for stage == "uv_unwrap" - manifest-
-    based, not the "06_" numeric-prefix convention, since that's config-dependent -
-    same pattern as view_slf.py)."""
+    """Accepts a mesh_uv.obj path, a uv_unwrap stage directory, or a pipeline run directory
+    (the stage dir is found by manifest.json `stage == "uv_unwrap"`)."""
     if run_dir_or_mesh.is_file():
         return run_dir_or_mesh
     direct = run_dir_or_mesh / "mesh_uv.obj"
@@ -114,11 +109,7 @@ def _uv_texture_resolution(mesh_uv_path: Path) -> tuple[int, int]:
 
 
 def uv_chart_ids(uv_mesh: UVMesh) -> np.ndarray:
-    """Connected components of the uv_mesh's own (post seam-cut) vertex/face graph.
-    xatlas duplicates a vertex across every seam it introduces, so two faces on
-    either side of a chart boundary never share a vertex index here even though
-    they're the same 3D position - meaning connected components of this graph
-    (unlike the source mesh's) are exactly the UV charts."""
+    """Connected components of the uv_mesh's own (post seam-cut) graph, which are the UV charts."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
@@ -133,8 +124,7 @@ def uv_chart_ids(uv_mesh: UVMesh) -> np.ndarray:
 
 
 def uv_packing_efficiency(uv_mesh: UVMesh) -> float:
-    """Total UV-space triangle area / 1.0 (the full [0,1]x[0,1] atlas square) -
-    continuous, resolution-independent packing-utilization metric."""
+    """Total UV-space triangle area (the atlas square is 1.0)."""
     uv = uv_mesh.uv
     f = uv_mesh.faces
     d1 = uv[f[:, 1]] - uv[f[:, 0]]
@@ -143,12 +133,11 @@ def uv_packing_efficiency(uv_mesh: UVMesh) -> float:
     return float(area.sum())
 
 
-_CHART_COLOR_GOLDEN_ANGLE = 0.6180339887498949  # for a well-spread hue sequence
+_CHART_COLOR_GOLDEN_ANGLE = 0.6180339887498949
 
 
 def chart_id_colors(chart_ids: np.ndarray) -> np.ndarray:
-    """One distinct-ish RGB color per chart id, via a golden-angle hue walk (cheap,
-    no extra dependency, avoids adjacent charts landing on similar hues)."""
+    """One RGB color per chart id via a golden-angle hue walk."""
     n_charts = int(chart_ids.max()) + 1
     hues = (np.arange(n_charts) * _CHART_COLOR_GOLDEN_ANGLE) % 1.0
     colors = np.stack([_hsv_to_rgb(h, 0.65, 0.95) for h in hues], axis=0)
@@ -164,9 +153,7 @@ def _hsv_to_rgb(h: float, s: float, v: float) -> np.ndarray:
 
 
 def save_uv_layout(uv_mesh: UVMesh, out_path: Path, size: int = 2048) -> None:
-    """Flat top-down wireframe of the UV atlas: every triangle edge drawn in UV
-    space. No GL context needed - useful headless or just for a quick static look
-    at chart packing/seams (versus the interactive 3D checker view for distortion)."""
+    """Flat top-down wireframe of the UV atlas. No GL context needed."""
     import cv2
 
     img = np.full((size, size, 3), 255, dtype=np.uint8)
@@ -326,8 +313,7 @@ def main() -> None:
         if args.layout_only:
             return
 
-    # capture_up_vector tolerates `path` being a stage dir or a bare .obj (it falls
-    # back to +Y), which is exactly the set of things this viewer accepts.
+    # capture_up_vector accepts a stage dir or a bare .obj (falls back to +Y).
     run_viewer(
         uv_mesh, args.width, args.height, args.checker_scale, args.chart_colors, up=capture_up_vector(args.path)
     )

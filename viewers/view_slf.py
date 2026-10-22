@@ -1,18 +1,10 @@
 #!/usr/bin/env python
-"""Interactive viewer for a finished SLF run: orbits the low-poly mesh and shades each
-fragment by evaluating its texel's fitted SH coefficients at the current view
-direction - the same math slf_fit's AtA/Atb accumulation was fit against, so this is a
-direct readout of the fit rather than a re-approximation.
-
-Adapted from surface-light-fields-for-planar-paintings' render.py, including its
-Parallax-Occlusion-Mapping. POM is needed here even though a real mesh is rendered: a
-fragment's own uv is the *naive* low-poly address, while training resolved every
-observation to the height-map-encoded true-surface uv before fitting, so rendering has
-to repeat that resolve or it reads the fit at the wrong address. Only the first march
-step uses the naive uv; everything after it uses the resolved one.
+"""Interactive viewer for a finished SLF run: orbits the low-poly mesh and shades each fragment
+by evaluating its texel's SH coefficients at the current view direction. Fragments are resolved
+to the true-surface uv with the same parallax march the fit used.
 
 Usage:
-    pip install -e ".[viewer]"   # moderngl + pygame, not installed by default
+    pip install -e ".[viewer]"   # moderngl + pygame
     python viewers/view_slf.py data/runs/apple_test
     python viewers/view_slf.py data/runs/apple_test --save-edit  # persist erased vertices on quit
 
@@ -34,7 +26,7 @@ import pygame
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling _common, however this file is launched
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling _common
 
 from _common import OrbitCamera, find_stage_dir, perspective  # noqa: E402
 from pipeline.core.camera_raster import to_gl_texture  # noqa: E402
@@ -46,8 +38,7 @@ from pipeline.schemas.texture_maps import HeightMap, SHTextureMap  # noqa: E402
 from pipeline.schemas.uv_mesh import UVMesh  # noqa: E402
 
 # ─── GLSL shaders ────────────────────────────────────────────────────────────
-# VERTEX_SHADER and resolve_parallax_uv come from pipeline/core/slf_shaders.py - the
-# same source the training pass compiles, not a separate port of it.
+# VERTEX_SHADER and resolve_parallax_uv come from pipeline/core/slf_shaders.py.
 
 FRAGMENT_HEADER = "#version 330\n"
 
@@ -102,34 +93,27 @@ def _uv_texture_resolution(uv_dir: Path) -> tuple[int, int]:
 
 def load_slf_result(run_dir: Path):
     uv_dir = find_stage_dir(run_dir, "uv_unwrap")
-    # The range-bounded map when the run has one - it is what export ships - else slf's.
+    # The range-bounded map when the run has one, else slf's.
     try:
         slf_dir = find_stage_dir(run_dir, "slf_bound")
     except FileNotFoundError:
         slf_dir = find_stage_dir(run_dir, "slf")
 
     uv_mesh = UVMesh.load(uv_dir / "mesh_uv.obj", texture_resolution=_uv_texture_resolution(uv_dir))
-    height_map = HeightMap.load(slf_dir / "height_map.png")  # same baseline height baking.py produced, unchanged by slf
+    height_map = HeightMap.load(slf_dir / "height_map.png")
     sh_map = SHTextureMap.load(slf_dir / "sh_texture_map.npz")
     if sh_map.up_vector is None:
-        # Run predates SHTextureMap.up_vector. Re-derive it from the same place slf
-        # would have: the ingest stage's poses. Doing it here (rather than leaving it
-        # None) means render-time code can rely on the axis existing for every run,
-        # new or old, without re-running the fit.
+        # Run predates SHTextureMap.up_vector; re-derive it from the ingest poses.
         ingest_dir = find_stage_dir(run_dir, "ingest")
         sh_map.up_vector = PosedImageSet.load(ingest_dir).mean_up_vector(ingest_dir)
 
-    # Neither the local frame nor xy_per_height is loaded at all any more: the shader
-    # rebuilds both per fragment from the interpolated vertex attributes
-    # (slf_shaders.uv_frame / xy_per_height). The atlas is still rasterized here for
-    # `valid`, `positions` and the normals `true_pos` is built from.
+    # The shader rebuilds the local frame and xy_per_height from vertex attributes. The atlas is
+    # still rasterized for `valid`, `positions` and the normals `true_pos` is built from.
     atlas = rasterize_uv_atlas(uv_mesh)
     height_range = height_map.march_range()
 
-    # slf_fit.py's `true_pos`: the flat atlas position pushed along the flat normal by
-    # the baked height. Training measured the SH view direction from this point, so
-    # rendering has to sample it too (not the rasterized `v_world_pos`) for the
-    # coefficients to be read at the angle they were fit against.
+    # slf_fit.py's `true_pos`: the flat atlas position pushed along the flat normal by the baked
+    # height; the SH view direction is measured from it.
     true_pos_render = atlas.positions + height_map.data.astype(np.float64)[..., None] * atlas.normals
 
     return (
@@ -143,19 +127,12 @@ def load_slf_result(run_dir: Path):
 
 
 # ─── vertex eraser ───────────────────────────────────────────────────────────
-# Hold E + left-drag deletes any vertex the cursor passes over, and every face touching
-# it. This only edits the geometry buffer in memory (and on GPU): the uv/sh/height
-# textures are untouched, so an erased patch just stops rasterizing and shows the clear
-# color through the hole. Nothing reaches disk unless run with --save-edit, which
-# overwrites uv_unwrap's mesh_uv.obj on quit (see run_viewer's save_if_edited) -
-# without it, quitting discards the edit.
+# Hold E + left-drag deletes vertices under the cursor and the faces touching them, in memory
+# only. --save-edit overwrites mesh_uv.obj on quit.
 
 
 class VertexEraser:
-    """Owns the mesh's live vertex/face/uv arrays and the GPU buffers built from them,
-    and knows how to drop vertices and re-upload. `uv_mesh` is kept only as a template
-    (for `to_trimesh`-adjacent metadata `vertex_frame_attributes` doesn't need per call);
-    its own `.vertices`/`.faces`/`.uv` are never read after `__init__`."""
+    """Owns the mesh's live vertex/face/uv arrays and GPU buffers; drops vertices and re-uploads."""
 
     def __init__(self, ctx: moderngl.Context, prog: moderngl.Program, uv_mesh: UVMesh):
         self._ctx = ctx
@@ -198,8 +175,7 @@ class VertexEraser:
         )
 
     def screen_positions(self, mvp: np.ndarray, width: int, height: int) -> np.ndarray:
-        """Current vertices projected to (x, y) pixel coordinates, NaN where a vertex is
-        behind the camera (w <= 0 - excluded from hit-testing, not clamped onto screen)."""
+        """Current vertices projected to (x, y) pixels, NaN where behind the camera."""
         verts_h = np.concatenate([self.vertices, np.ones((len(self.vertices), 1))], axis=1)
         clip = verts_h @ mvp.T.astype(np.float64)
         w = clip[:, 3]
@@ -209,10 +185,8 @@ class VertexEraser:
         return screen
 
     def erase_near(self, mvp: np.ndarray, width: int, height: int, cursor: tuple[int, int], radius_px: float) -> int:
-        """Deletes every vertex within `radius_px` of `cursor` (and the faces touching
-        any of them), rebuilds the GPU buffers, and returns how many vertices were
-        removed. A no-op (0 returned, buffers untouched) if that would empty the mesh -
-        an all-deleted mesh has nothing for `vao.render()` to draw."""
+        """Deletes every vertex within `radius_px` of `cursor` and its faces, rebuilds the GPU
+        buffers, and returns the number removed. No-op if that would empty the mesh."""
         if len(self.vertices) == 0:
             return 0
         screen = self.screen_positions(mvp, width, height)
@@ -224,7 +198,7 @@ class VertexEraser:
         keep[hit] = False
         new_faces_mask = keep[self.faces].all(axis=1)
         if not new_faces_mask.any():
-            return 0  # would erase the whole mesh - refuse rather than render nothing
+            return 0
         old_to_new = np.full(len(self.vertices), -1, dtype=np.int64)
         old_to_new[keep] = np.arange(keep.sum())
 
@@ -237,9 +211,7 @@ class VertexEraser:
         return int((~keep).sum())
 
     def to_uv_mesh(self) -> UVMesh:
-        """A UVMesh snapshot of the current (possibly edited) geometry, vertex normals
-        recomputed fresh - the loaded ones are indexed against the original vertex
-        count and would silently misalign after any deletion."""
+        """A UVMesh snapshot of the current geometry, vertex normals recomputed."""
         mesh = dataclasses.replace(self._template, vertices=self.vertices, faces=self.faces, uv=self.uv)
         mesh.vertex_normals = vertex_normals_for(mesh)
         mesh.source_vertex_index = self.source_vertex_index
@@ -262,8 +234,7 @@ def run_viewer(
         height_range,
     ) = load_slf_result(run_dir)
     uv_mesh_path = find_stage_dir(run_dir, "uv_unwrap") / "mesh_uv.obj"
-    # The orbit turns about the capture's own up axis, not world +Y: see _common's
-    # module docstring for why a reconstruction's world frame has no up of its own.
+    # The orbit turns about the capture's own up axis (see _common).
     capture_up = np.asarray(sh_map.up_vector, dtype=np.float64)
     print(
         f"Mesh: {len(uv_mesh.vertices)} verts, {len(uv_mesh.faces)} faces  |  "
@@ -294,7 +265,7 @@ def run_viewer(
     tex_w, tex_h = uv_mesh.texture_resolution
 
     height_tex = to_gl_texture(ctx, height_map.data.astype(np.float32)[..., None])
-    valid_rg = np.stack([atlas.valid, sh_map.valid], axis=-1).astype(np.float32)  # r=atlas.valid, g=sh_map.valid
+    valid_rg = np.stack([atlas.valid, sh_map.valid], axis=-1).astype(np.float32)  # r=atlas, g=sh
     valid_tex = to_gl_texture(ctx, valid_rg)
 
     for unit, tex in enumerate(
@@ -320,10 +291,8 @@ def run_viewer(
     coeff_tex.use(3)
     prog["u_coeffs"].value = 3
 
-    # The four frame textures this used to upload are gone; these three attributes
-    # replace them, and must be the same per-vertex arrays uv_geometry interpolated
-    # into the atlas (vertex_frame_attributes) for a fragment's frame to match the fit's.
-    # VertexEraser owns the VAO/VBO/IBO from here on and rebuilds them on every deletion.
+    # Frame attributes must be the same per-vertex arrays uv_geometry interpolated into the atlas.
+    # VertexEraser owns the VAO/VBO/IBO from here on.
     eraser = VertexEraser(ctx, prog, uv_mesh)
 
     clock = pygame.time.Clock()
@@ -332,9 +301,7 @@ def run_viewer(
     last_mouse = (0, 0)
     total_erased = 0
 
-    # Last frame's MVP: what's actually on screen when an event arrives this frame, so
-    # erase hit-testing picks the vertex under the cursor rather than where it will be
-    # after this frame's own camera move.
+    # Last frame's MVP, so erase hit-testing matches what is on screen.
     eye = camera.position.astype(np.float32)
     mvp = (perspective(45.0, width / height, camera.radius * 0.02, camera.radius * 20.0) @ camera.view_matrix())
     mvp = mvp.astype(np.float32)
@@ -345,9 +312,7 @@ def run_viewer(
         if total_erased == 0:
             print("--save-edit given but nothing was erased; leaving mesh_uv.obj untouched")
             return
-        # One backup of the pre-edit mesh, kept across repeated edit sessions - only
-        # taken if it doesn't already exist, so a second sitting can't overwrite the
-        # true original with an already-edited one.
+        # One backup of the pre-edit mesh, never overwritten by a later edit.
         backup_path = uv_mesh_path.with_suffix(".obj.bak")
         if not backup_path.exists():
             shutil.copyfile(uv_mesh_path, backup_path)
@@ -410,7 +375,7 @@ def run_viewer(
         prog["u_mvp"].write(mvp.flatten(order="F").tobytes())
         prog["u_cam_pos"].value = tuple(eye.tolist())
 
-        ctx.clear(0.05, 0.1, 0.55)  # blue: distinguishes empty viewport background from the red/yellow debug overlays
+        ctx.clear(0.05, 0.1, 0.55)
         eraser.vao.render()
         pygame.display.flip()
         clock.tick(60)

@@ -11,13 +11,12 @@ import trimesh
 
 @dataclass
 class UVMesh:
-    vertices: np.ndarray  # (V, 3) float64 - may be re-indexed vs. the source mesh (seam cuts duplicate verts)
+    vertices: np.ndarray  # (V, 3) float64; re-indexed vs. the source mesh (seam cuts duplicate verts)
     faces: np.ndarray  # (F, 3) int64
-    uv: np.ndarray  # (V, 2) float32 in [0, 1], one UV per vertex (post seam-cut, so 1:1 is valid)
+    uv: np.ndarray  # (V, 2) float32 in [0, 1], one UV per vertex
     vertex_normals: np.ndarray | None = None
     texture_resolution: tuple[int, int] = (1024, 1024)
-    # Maps each post-unwrap vertex back to its source-mesh vertex index, so baking can
-    # fetch high-poly data (or just re-run raycasts) per UV vertex. Produced by xatlas.
+    # Maps each post-unwrap vertex back to its source-mesh vertex index (from xatlas).
     source_vertex_index: np.ndarray | None = None  # (V,) int64
 
     def __len__(self) -> int:

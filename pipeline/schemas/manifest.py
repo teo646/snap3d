@@ -1,10 +1,5 @@
-"""Shared manifest format written by every stage wrapper.
-
-Every ``data/runs/<run_id>/NN_<stage>/`` directory contains a
-``manifest.json`` following :class:`StageManifest`. It records enough
-information (input hashes + params) for the orchestrator to decide whether
-a stage can be skipped on re-run (simple content-addressed caching).
-"""
+"""Shared manifest format written by every stage wrapper: ``data/runs/<run_id>/NN_<stage>/manifest.json``
+records input hashes + params so the orchestrator can skip unchanged stages."""
 
 from __future__ import annotations
 
@@ -43,9 +38,7 @@ def hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
 
 
 def hash_tree(path: Path) -> str:
-    """Hash of a file or directory. Directories are hashed as sha256 over the sorted
-    list of (relative path, file hash) - i.e. this also picks up added/removed/renamed
-    files, not just content changes."""
+    """Hash of a file or directory (sha256 over sorted (relative path, file hash) for directories)."""
     if path.is_file():
         return hash_file(path)
     h = hashlib.sha256()
