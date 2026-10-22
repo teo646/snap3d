@@ -1,7 +1,7 @@
 [project]
-name = "sh-texture-pipeline"
+name = "snap3d"
 version = "0.1.0"
-description = "Multi-view photo -> height map + SH texture map reconstruction pipeline"
+description = "Multi-view photos -> low-poly mesh + SH texture bundle for web rendering"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11,<3.13"
@@ -39,7 +39,7 @@ viewer = [
 dev = [
   "pytest>=8.0",
 ]
-all = ["sh-texture-pipeline[masking,viewer]"]
+all = ["snap3d[masking,viewer]"]
 
 [build-system]
 requires = ["setuptools>=68"]
