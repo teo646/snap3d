@@ -1,0 +1,551 @@
+diff --git a/arguments/__init__.py b/arguments/__init__.py
+index 275f4e3..807039d 100755
+--- a/arguments/__init__.py
++++ b/arguments/__init__.py
+@@ -60,6 +60,10 @@ class ModelParams(ParamGroup):
+         self.multi_view_max_angle = 30
+         self.multi_view_min_dis = 0.01
+         self.multi_view_max_dis = 1.5
++        # Directory of per-view monocular geometry priors, one `<image_name>.pth` holding
++        # float16 {depth, conf, normal} - what pipeline/stages/geometry_prior writes from
++        # Metric3Dv2. Empty disables them; see OptimizationParams.lambda_depth_prior.
++        self.prior_path = ""
+         super().__init__(parser, "Loading Parameters", sentinel)
+ 
+     def extract(self, args):
+@@ -88,6 +92,27 @@ class OptimizationParams(ParamGroup):
+         self.rotation_lr = 0.001
+         self.percent_dense = 0.001
+         self.lambda_dssim = 0.2
++        # Weight on |rendered_alpha - Camera.mask|, applied only when the training images
++        # are RGBA (see train.py). 0 disables it, which is the stock behaviour.
++        self.lambda_mask_alpha = 0.0
++        # Weight on the scale-and-shift invariant depth prior residual, restricted to the
++        # object mask (see utils/loss_utils.depth_prior_loss). 0 disables it, which is
++        # upstream's behaviour - FastGS has no prior term of its own. Needs ModelParams'
++        # prior_path to point at a geometry_prior stage's output.
++        self.lambda_depth_prior = 0.0
++        # Last iteration the depth prior is applied. It only starts at
++        # single_view_weight_from_iter (7000) in any case, because that is where the plane
++        # rasterizer that produces `plane_depth` switches on.
++        self.depth_prior_until_iter = 15000
++        # 1: weight the depth prior by how little the *render* can be trusted at each pixel
++        # (utils/loss_utils.depth_prior_loss, `render_conf`), instead of one flat weight.
++        # An int, not a bool, so the value can be passed explicitly on the command line.
++        # 1: render conf = accumulated alpha x agreement of the render's two normals.
++        # 2: render conf = multi-view geometric consistency (utils/loss_utils.
++        # geometric_consistency_conf): the render's depth, checked against that of
++        # `depth_prior_geo_neighbors` neighbouring views.
++        self.depth_prior_render_conf = 0
++        self.depth_prior_geo_neighbors = 2
+         self.densification_interval = 100
+         self.opacity_reset_interval = 3000
+         self.densify_from_iter = 500
+diff --git a/gaussian_renderer/__init__.py b/gaussian_renderer/__init__.py
+index 70b55ab..c6ef754 100755
+--- a/gaussian_renderer/__init__.py
++++ b/gaussian_renderer/__init__.py
+@@ -163,7 +163,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
+                     "out_observe": out_observe,
+                     "rendered_normal": rendered_normal,
+                     "plane_depth": plane_depth,
+-                    "rendered_distance": rendered_distance
++                    "rendered_distance": rendered_distance,
++                    "rendered_alpha": rendered_alpha
+                     }
+     
+     if app_model is not None and pc.use_app:
+diff --git a/scene/cameras.py b/scene/cameras.py
+index 34ed49a..e7394ee 100755
+--- a/scene/cameras.py
++++ b/scene/cameras.py
+@@ -88,7 +88,7 @@ class Camera(nn.Module):
+             gt_image, gray_image, loaded_mask = process_image(self.image_path, self.resolution, ncc_scale)
+             self.original_image = gt_image.to(self.data_device)
+             self.original_image_gray = gray_image.to(self.data_device)
+-            self.mask = loaded_mask
++            self.mask = loaded_mask.to(self.data_device) if loaded_mask is not None else None
+ 
+ 
+         self.zfar = 100.0
+diff --git a/scene/gaussian_model.py b/scene/gaussian_model.py
+index 40761fb..f7085f1 100755
+--- a/scene/gaussian_model.py
++++ b/scene/gaussian_model.py
+@@ -20,7 +20,31 @@ from utils.sh_utils import RGB2SH
+ from simple_knn._C import distCUDA2
+ from utils.graphics_utils import BasicPointCloud
+ from utils.general_utils import strip_symmetric, build_scaling_rotation
+-from pytorch3d.transforms import quaternion_to_matrix
++# pytorch3d is imported for this one function and has no prebuilt wheel matching
++# this project's torch/CUDA/GPU-arch combination. Same vendoring the PGSR
++# submodule already carries, for the same reason.
++def quaternion_to_matrix(quaternions):
++    """Vendored from pytorch3d.transforms.quaternion_to_matrix (BSD-licensed) to avoid
++    depending on pytorch3d, which has no prebuilt wheel matching this project's
++    torch/CUDA/GPU-arch combination. quaternions: (..., 4) real-part-first (w, x, y, z)."""
++    r, i, j, k = torch.unbind(quaternions, -1)
++    two_s = 2.0 / (quaternions * quaternions).sum(-1)
++    o = torch.stack(
++        (
++            1 - two_s * (j * j + k * k),
++            two_s * (i * j - k * r),
++            two_s * (i * k + j * r),
++            two_s * (i * j + k * r),
++            1 - two_s * (i * i + k * k),
++            two_s * (j * k - i * r),
++            two_s * (i * k - j * r),
++            two_s * (j * k + i * r),
++            1 - two_s * (i * i + j * j),
++        ),
++        -1,
++    )
++    return o.reshape(quaternions.shape[:-1] + (3, 3))
++
+ 
+ def dilate(bin_img, ksize=5):
+     pad = (ksize - 1) // 2
+diff --git a/scripts/render_tnt.py b/scripts/render_tnt.py
+index 7a17504..9a49118 100755
+--- a/scripts/render_tnt.py
++++ b/scripts/render_tnt.py
+@@ -140,9 +140,15 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, a
+         depths_tsdf_fusion.append(depth_tsdf.squeeze().cpu())
+         
+     if volume is not None:
+-        depths_tsdf_fusion = torch.stack(depths_tsdf_fusion, dim=0)
++        # A list, not torch.stack: views need not share a resolution (a capture with one
++        # camera per photo comes out of the undistorter a pixel or two apart).
+         for idx, view in enumerate(tqdm(views, desc="TSDF Fusion progress")):
+             ref_depth = depths_tsdf_fusion[idx].cuda()
++            # This view's own size. `H, W` used to be whatever the last view of the
++            # rendering loop above left behind, which is wrong for every other size.
++            H, W = ref_depth.shape
++            if view.mask is not None:
++                ref_depth[view.mask.squeeze() < 0.5] = 0
+ 
+             if bounds is not None:
+                 pts = gaussians.get_points_from_depth(view, ref_depth)
+diff --git a/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/auxiliary.h b/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/auxiliary.h
+index 27d372d..527eb06 100755
+--- a/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/auxiliary.h
++++ b/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/auxiliary.h
+@@ -335,6 +335,20 @@ __device__ inline uint32_t duplicateToTilesTouched(
+ 
+     // Threshold: opacity * Gaussian = 1 / 255
+     float t = 2.0f * log(con_o.w * 255.0f);
++
++    // An opacity below 1/255 makes that log negative, which flips the sign under both
++    // sqrt() below and yields NaN. The NaN propagates into bbox_min/bbox_max and then
++    // into the integer tile rect, so the writes that follow land outside the buffer -
++    // the run dies with an illegal memory access a few hundred iterations after a
++    // densification, which is where such Gaussians get created. opacity_cull_threshold
++    // does not prevent it: that is applied when pruning, not when splitting.
++    //
++    // Such a Gaussian contributes less than one 8-bit level to any pixel, so it belongs
++    // in no tile at all - the same answer the ill-formed-ellipse guard above gives.
++    if (t <= 0.0f) {
++        return 0;
++    }
++
+     t = mult * t; // beta in Compact Box
+ 
+     float x_term = sqrt(-(con_o.y * con_o.y * t) / (disc * con_o.x));
+diff --git a/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/rasterizer_impl.h b/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/rasterizer_impl.h
+index 2370948..0123795 100755
+--- a/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/rasterizer_impl.h
++++ b/submodules/diff-gaussian-rasterization_fastgs/cuda_rasterizer/rasterizer_impl.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <iostream>
+ #include <vector>
+ #include "rasterizer.h"
+diff --git a/submodules/diff-plane-rasterization/cuda_rasterizer/auxiliary.h b/submodules/diff-plane-rasterization/cuda_rasterizer/auxiliary.h
+index 0332e24..31e8aed 100755
+--- a/submodules/diff-plane-rasterization/cuda_rasterizer/auxiliary.h
++++ b/submodules/diff-plane-rasterization/cuda_rasterizer/auxiliary.h
+@@ -322,6 +322,20 @@ __device__ inline uint32_t duplicateToTilesTouched(
+ 
+     // Threshold: opacity * Gaussian = 1 / 255
+     float t = 2.0f * log(con_o.w * 255.0f);
++
++    // An opacity below 1/255 makes that log negative, which flips the sign under both
++    // sqrt() below and yields NaN. The NaN propagates into bbox_min/bbox_max and then
++    // into the integer tile rect, so the writes that follow land outside the buffer -
++    // the run dies with an illegal memory access a few hundred iterations after a
++    // densification, which is where such Gaussians get created. opacity_cull_threshold
++    // does not prevent it: that is applied when pruning, not when splitting.
++    //
++    // Such a Gaussian contributes less than one 8-bit level to any pixel, so it belongs
++    // in no tile at all - the same answer the ill-formed-ellipse guard above gives.
++    if (t <= 0.0f) {
++        return 0;
++    }
++
+     t = mult * t;
+ 
+     float x_term = sqrt(-(con_o.y * con_o.y * t) / (disc * con_o.x));
+diff --git a/submodules/diff-plane-rasterization/cuda_rasterizer/rasterizer_impl.h b/submodules/diff-plane-rasterization/cuda_rasterizer/rasterizer_impl.h
+index bc3f0ec..9cb6154 100755
+--- a/submodules/diff-plane-rasterization/cuda_rasterizer/rasterizer_impl.h
++++ b/submodules/diff-plane-rasterization/cuda_rasterizer/rasterizer_impl.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <iostream>
+ #include <vector>
+ #include "rasterizer.h"
+diff --git a/submodules/simple-knn/simple_knn.cu b/submodules/simple-knn/simple_knn.cu
+index e72e4c9..d2d3f41 100755
+--- a/submodules/simple-knn/simple_knn.cu
++++ b/submodules/simple-knn/simple_knn.cu
+@@ -11,6 +11,7 @@
+ 
+ #define BOX_SIZE 1024
+ 
++#include <cfloat>
+ #include "cuda_runtime.h"
+ #include "device_launch_parameters.h"
+ #include "simple_knn.h"
+diff --git a/train.py b/train.py
+index 3b126e4..3787e6c 100755
+--- a/train.py
++++ b/train.py
+@@ -15,7 +15,7 @@ import torch
+ import random
+ import numpy as np
+ from random import randint
+-from utils.loss_utils import l1_loss, ssim, lncc, get_img_grad_weight
++from utils.loss_utils import l1_loss, ssim, lncc, get_img_grad_weight, depth_prior_loss, geometric_consistency_conf
+ from fused_ssim import fused_ssim as fast_ssim
+ from utils.graphics_utils import patch_offsets, patch_warp
+ from gaussian_renderer import render, network_gui
+@@ -80,6 +80,74 @@ def gen_virtul_cam(cam, trans_noise=1.0, deg_noise=15.0):
+                         preload_img=False, data_device = "cuda")
+     return virtul_cam
+ 
++# Monocular depth priors (pipeline/stages/geometry_prior, Metric3Dv2), read lazily and
++# cached per view already resized to the render resolution. One `.pth` per image holding
++# float16 {depth, conf, normal}; only depth and conf are used here. The cache is kept on
++# the CPU - 138 views of 1600x1200 is ~1 GB as float16 - and one view is moved to the GPU
++# per iteration, which is the same view the iteration was going to render anyway.
++_DEPTH_PRIOR_CACHE = {}
++
++
++def _load_depth_prior(prior_path, image_name, height, width):
++    """(depth, conf) float32 CUDA tensors of shape [1, H, W], or (None, None) when this
++    view has no prior file."""
++    key = (prior_path, image_name, height, width)
++    if key not in _DEPTH_PRIOR_CACHE:
++        path = os.path.join(prior_path, image_name + ".pth")
++        if not os.path.exists(path):
++            _DEPTH_PRIOR_CACHE[key] = None
++        else:
++            prior = torch.load(path, map_location="cpu", weights_only=True)
++            # Metric3D predicts at its own ViT input size, not the photo's - 616x821 for
++            # a 2000x1500 frame - and FastGS renders at a third resolution again (`-r`,
++            # or the 1600px auto-downscale). So resize rather than assume. Aspect ratio
++            # does line up: geometry_prior reads with IMREAD_IGNORE_ORIENTATION, the same
++            # stored-buffer frame COLMAP posed and surface_recon renders.
++            def _fit(t):
++                return torch.nn.functional.interpolate(
++                    t.float().reshape(1, 1, *t.shape[-2:]), size=(height, width),
++                    mode="bilinear", align_corners=False,
++                ).squeeze(0).half()
++            _DEPTH_PRIOR_CACHE[key] = (_fit(prior["depth"]), _fit(prior["conf"]))
++    cached = _DEPTH_PRIOR_CACHE[key]
++    if cached is None:
++        return None, None
++    return cached[0].float().cuda(), cached[1].float().cuda()
++
++
++def _camera_dict(cam):
++    return {"R": cam.R, "T": cam.T, "fx": cam.Fx, "fy": cam.Fy, "cx": cam.Cx, "cy": cam.Cy}
++
++
++@torch.no_grad()
++def _geometric_render_conf(viewpoint_cam, plane_depth, scene, gaussians, pipe, bg, opt, app_model, pixel_mask):
++    """[1, H, W] confidence in this view's rendered depth from multi-view geometric
++    consistency, or None when the view has no neighbours. `depth_prior_geo_neighbors`
++    neighbours are rendered and checked (`geometric_consistency_conf`); a pixel counts as
++    confirmed when any one of them agrees, so it takes the best of them. A pixel no
++    neighbour can see comes out 0 - nothing confirms it - and the prior is charged in
++    full there. Only the pixels of `pixel_mask` ([1, H, W] bool - the ones the depth prior
++    reads) are computed; the rest are 0, which keeps this frame-sized work down to the
++    object's share of the frame."""
++    ids = viewpoint_cam.nearest_id
++    if len(ids) == 0:
++        return None
++    train_cameras = scene.getTrainCameras()
++    depth_a = plane_depth.detach().squeeze(0)
++    best = torch.zeros_like(depth_a)
++    for idx in random.sample(list(ids), min(opt.depth_prior_geo_neighbors, len(ids))):
++        nearest_cam = train_cameras[idx]
++        pkg = render(nearest_cam, gaussians, pipe, bg, opt, app_model=app_model,
++                     return_plane=True, return_depth_normal=False)
++        depth_b = pkg["plane_depth"].squeeze(0)
++        del pkg  # the rest of the neighbour's render is not needed; do not hold it through the check
++        conf = geometric_consistency_conf(
++            depth_a, depth_b, _camera_dict(viewpoint_cam), _camera_dict(nearest_cam),
++            opt.multi_view_pixel_noise_th, pixel_mask.squeeze(0))
++        best = torch.maximum(best, conf)
++    return best.unsqueeze(0)
++
++
+ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+     first_iter = 0
+     tb_writer = prepare_output_and_logger(dataset)
+@@ -120,6 +188,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+ 
+     viewpoint_stack = None
+     ema_loss_for_log = 0.0
++    # Diagnostics for the depth prior term: its magnitude, and how many pixels the mask
++    # it is averaged over actually kept. Without the second number a small loss is
++    # ambiguous - it reads the same whether the weight is too low or the mask came out
++    # empty and the term was never computed at all.
++    ema_depth_prior_for_log = 0.0
++    depth_prior_px_for_log = 0
++    render_conf_for_log = 0.0
+     ema_single_view_for_log = 0.0
+     ema_multi_view_geo_for_log = 0.0
+     ema_multi_view_pho_for_log = 0.0
+@@ -156,6 +231,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+             render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+         
+         # Loss
++        # Camera.mask is the alpha of an RGBA training image (see scene/cameras.py): the
++        # object's silhouette. The photometric terms below stay full-frame on purpose -
++        # when the training images have their background replaced by the render background
++        # colour, that full-frame L1 *is* the signal telling the optimiser to leave the
++        # background empty, and restricting it to the mask removes that signal entirely.
++        # The mask is used for an explicit alpha term further down instead.
++        cam_mask = viewpoint_cam.mask
++        if cam_mask is not None:
++            cam_mask = cam_mask.to(image.device)
+         ssim_loss = (1.0 - fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)))
+         if 'app_image' in render_pkg and ssim_loss < 0.5:
+             app_image = render_pkg['app_image']
+@@ -164,7 +248,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+             Ll1 = l1_loss(image, gt_image)
+         image_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
+         loss = image_loss.clone()
+-        
++
++        # Mask alpha loss. A black background in the training image only constrains
++        # rendered *colour*, which a black opaque Gaussian satisfies just as well as empty
++        # space, so photometric terms alone cannot clear the background - and FastGS's
++        # pruning heuristics will not either, because every one of them (multi-view trim's
++        # out_observe, densify_and_prune_fastgs's importance/pruning score) asks whether a
++        # Gaussian was *rendered*, not whether it was penalised. Supervising accumulated
++        # alpha against the mask is what makes "no object here" mean "no geometry here".
++        # Only available while the plane rasterizer runs (return_plane), i.e. after
++        # single_view_weight_from_iter.
++        if cam_mask is not None and opt.lambda_mask_alpha > 0.0 and 'rendered_alpha' in render_pkg:
++            alpha_loss = opt.lambda_mask_alpha * torch.abs(render_pkg['rendered_alpha'] - cam_mask).mean()
++            loss += alpha_loss
++
+         # scale loss
+         if visibility_filter.sum() > 0:
+             scale = gaussians.get_scaling[visibility_filter]
+@@ -186,8 +283,51 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+                 normal_loss = weight * (((depth_normal - normal)).abs().sum(0)).mean()
+             loss += (normal_loss)
+ 
++            # Depth prior loss, masked to the object. Lives inside this branch because
++            # `plane_depth` only exists once return_plane is on, which is this same
++            # single_view_weight_from_iter boundary - so the prior cannot act as an
++            # early scaffold without paying for the plane rasterizer from iteration 1. Bounded above by depth_prior_until_iter for the same
++            # reason that bound exists upstream: a prior is a nudge toward a plausible
++            # shape, and past the point where the photometric fit has converged it can
++            # only pull the surface away from the photographs.
++            if opt.lambda_depth_prior > 0.0 and iteration <= opt.depth_prior_until_iter:
++                plane_depth = render_pkg["plane_depth"]
++                prior_depth, prior_conf = _load_depth_prior(
++                    dataset.prior_path, viewpoint_cam.image_name,
++                    plane_depth.shape[-2], plane_depth.shape[-1],
++                )
++                if prior_depth is not None:
++                    prior_mask = (plane_depth > 0) & (prior_depth > 0) & (prior_conf > 0)
++                    if cam_mask is not None:
++                        prior_mask = prior_mask & (cam_mask > 0.5)
++                    render_conf = None
++                    if opt.depth_prior_render_conf == 2:
++                        render_conf = _geometric_render_conf(
++                            viewpoint_cam, plane_depth, scene, gaussians, pipe, bg, opt, app_model, prior_mask)
++                        if render_conf is not None:
++                            render_conf_for_log = float(render_conf[prior_mask].mean()) if prior_mask.any() else 0.0
++                    elif opt.depth_prior_render_conf == 1:
++                        # How much the render can be trusted here: it has to be solid
++                        # (accumulated alpha) and agree with itself (the normal it
++                        # predicts vs the one its own depth implies). Both normals are
++                        # normalised first - `depth_normal` carries a factor of alpha.
++                        n_render = torch.nn.functional.normalize(render_pkg["rendered_normal"], dim=0, eps=1e-6)
++                        n_depth = torch.nn.functional.normalize(render_pkg["depth_normal"], dim=0, eps=1e-6)
++                        agree = (n_render * n_depth).sum(0, keepdim=True).clamp(0.0, 1.0)
++                        render_conf = (render_pkg["rendered_alpha"] * agree).detach()
++                        render_conf_for_log = float(render_conf[prior_mask].mean()) if prior_mask.any() else 0.0
++                    depth_loss = opt.lambda_depth_prior * depth_prior_loss(
++                        plane_depth, prior_depth, prior_conf, prior_mask, render_conf
++                    )
++                    loss += depth_loss
++                    ema_depth_prior_for_log = 0.4 * depth_loss.item() + 0.6 * ema_depth_prior_for_log
++                    depth_prior_px_for_log = int(prior_mask.sum())
++
+         # multi-view loss
+-        if iteration > opt.multi_view_weight_from_iter:
++        # Bounded above by multi_view_weight_until_iter: arguments/__init__.py declares it
++        # (10000) but upstream never reads it, so the loss otherwise stays on to the last
++        # iteration. Measured on boots: 50:00 -> 20:23 for 30000 iterations, mesh unchanged.
++        if opt.multi_view_weight_from_iter < iteration <= opt.multi_view_weight_until_iter:
+             nearest_cam = None if len(viewpoint_cam.nearest_id) == 0 else scene.getTrainCameras()[random.sample(viewpoint_cam.nearest_id,1)[0]]
+             use_virtul_cam = False
+             if opt.use_virtul_cam and (np.random.random() < opt.virtul_cam_prob or nearest_cam is None):
+@@ -329,6 +469,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+                     "Loss": f"{ema_loss_for_log:.{5}f}",
+                     "Points": f"{len(gaussians.get_xyz)}"
+                 }
++                if opt.lambda_depth_prior > 0.0 and iteration <= opt.depth_prior_until_iter:
++                    loss_dict["dprior"] = f"{ema_depth_prior_for_log:.{6}f}"
++                    loss_dict["dpx"] = f"{depth_prior_px_for_log}"
++                    if opt.depth_prior_render_conf:
++                        loss_dict["rconf"] = f"{render_conf_for_log:.{3}f}"
+                 progress_bar.set_postfix(loss_dict)
+                 progress_bar.update(10)
+             if iteration == opt.iterations:
+diff --git a/utils/loss_utils.py b/utils/loss_utils.py
+index 0e8075c..86febe7 100755
+--- a/utils/loss_utils.py
++++ b/utils/loss_utils.py
+@@ -138,4 +138,125 @@ def lncc(ref, nea):
+     ncc = torch.clamp(ncc, 0.0, 2.0)
+     ncc = torch.mean(ncc, dim=1, keepdim=True)
+     mask = (ncc < 0.9)
+-    return ncc, mask
+\ No newline at end of file
++    return ncc, mask
++
++# Floor on the render confidence in the alignment's weights, so a view the render is not
++# yet sure about anywhere (7000 iterations in, the plane rasterizer has just switched on)
++# still has a well-posed fit instead of one whose weights are all ~0.
++_RENDER_CONF_FIT_FLOOR = 0.05
++
++
++def geometric_consistency_conf(depth_a, depth_b, cam_a, cam_b, pixel_noise_th=1.0, pixel_mask=None):
++    """How far view A's depth can be trusted, from whether view B's depth agrees with it.
++
++    Each pixel of A is lifted to 3D with A's depth and projected into B; B's depth is read
++    there, the point it implies on B's ray is projected back into A, and the distance to
++    where the pixel started is the forward-backward reprojection error (in A's pixels).
++    That is the check the multi-view loss in train.py makes, and a surface both views
++    agree on passes it; a surface one of them has wrong does not.
++
++    `depth_a`, `depth_b`: [H, W] plane depth. `cam_*`: dicts with `R`, `T` (3DGS's own
++    convention: `R` is camera-to-world, `x_cam = x_world @ R + T`) and `fx fy cx cy`.
++    `pixel_mask` ([H, W] bool, optional) restricts the computation to those pixels of A; the
++    rest come out 0. Every intermediate is per pixel and several are (N, 3) float32, so on
++    a 3 MP frame they are tens of MB each and a dozen are alive at once - the depth prior
++    only reads the conf inside the object's mask, a small fraction of the frame, so passing
++    that mask shrinks them by the same factor.
++
++    Returns [H, W] in [0, 1]: `exp(-error)` where the error is below `pixel_noise_th`, and
++    0 where it is not, or where the pixel falls outside B or has no depth to check.
++    """
++    H, W = depth_a.shape
++    dev = depth_a.device
++    if pixel_mask is None:
++        ys, xs = torch.meshgrid(torch.arange(H, device=dev), torch.arange(W, device=dev), indexing="ij")
++        pix = torch.stack([xs, ys], dim=-1).float().reshape(-1, 2)
++        d_a = depth_a.reshape(-1)
++    else:
++        ys, xs = torch.nonzero(pixel_mask, as_tuple=True)
++        pix = torch.stack([xs, ys], dim=-1).float()
++        d_a = depth_a[ys, xs]
++
++    def backproject(d, cam):
++        ray = torch.stack([(pix[:, 0] - cam["cx"]) / cam["fx"], (pix[:, 1] - cam["cy"]) / cam["fy"],
++                           torch.ones_like(pix[:, 0])], dim=-1)
++        x_cam = ray * d.reshape(-1, 1)
++        return (x_cam - cam["T"]) @ cam["R"].T
++
++    def to_cam(x_world, cam):
++        return x_world @ cam["R"] + cam["T"]
++
++    def project(x_cam, cam):
++        return torch.stack([x_cam[:, 0] * cam["fx"] / x_cam[:, 2] + cam["cx"],
++                            x_cam[:, 1] * cam["fy"] / x_cam[:, 2] + cam["cy"]], dim=-1)
++
++    cam_a = {k: (torch.as_tensor(v, dtype=torch.float32, device=dev)) for k, v in cam_a.items()}
++    cam_b = {k: (torch.as_tensor(v, dtype=torch.float32, device=dev)) for k, v in cam_b.items()}
++
++    x_in_b = to_cam(backproject(d_a, cam_a), cam_b)
++    uv_b = project(x_in_b, cam_b)
++    Hb, Wb = depth_b.shape
++    inside = (uv_b[:, 0] > 0) & (uv_b[:, 0] < Wb) & (uv_b[:, 1] > 0) & (uv_b[:, 1] < Hb) & (x_in_b[:, 2] > 0.1)
++    grid = torch.stack([uv_b[:, 0] / ((Wb - 1) / 2) - 1.0, uv_b[:, 1] / ((Hb - 1) / 2) - 1.0], dim=-1)
++    z_b = torch.nn.functional.grid_sample(
++        depth_b[None, None], grid.reshape(1, -1, 1, 2), mode="bilinear", padding_mode="border", align_corners=True
++    ).reshape(-1)
++    x_b_on_ray = x_in_b / x_in_b[:, 2:3] * z_b[:, None]
++    back = project(to_cam((x_b_on_ray - cam_b["T"]) @ cam_b["R"].T, cam_a), cam_a)
++    error = torch.norm(back - pix, dim=-1)
++    ok = inside & (z_b > 0) & (d_a > 0) & torch.isfinite(error) & (error < pixel_noise_th)
++    # where(), not `* ok`: a pixel whose error is NaN/inf would give NaN * 0 = NaN.
++    conf = torch.where(ok, torch.exp(-error), torch.zeros_like(error))
++    if pixel_mask is None:
++        return conf.reshape(H, W)
++    out = torch.zeros(H, W, device=dev, dtype=conf.dtype)
++    out[ys, xs] = conf
++    return out
++
++
++def depth_prior_loss(rendered_depth, prior_depth, prior_conf, mask, render_conf=None):
++    """Scale-and-shift invariant depth prior loss over `mask` only.
++
++    Metric3D is a monocular predictor: it sees one frame at a time, so its depth is not
++    scale-consistent between views and comparing it to the rendered depth directly would
++    fight the reconstruction's own scale. This solves a confidence-weighted least squares
++    for the per-view `omega * D_render + b ~ D_prior` that best aligns them, detaches
++    that solution, and only then takes the residual - so the gradient supervises the
++    *shape* of the depth and never its absolute scale or offset.
++
++    `mask` is the object silhouette intersected with wherever the render and the prior
++    are both valid. Restricting to it is the point: the prior is a statement about the
++    object, and on a capture where the object is a small part of the frame most of the
++    frame is background the prior has no business shaping.
++
++    `render_conf` ([1, H, W] in [0, 1], detached; None = off) is how far the render itself
++    can be trusted at each pixel. When given, the two uses of the weights part ways: the
++    alignment is fitted where the render is trustworthy (`prior_conf * render_conf`, plus a
++    small floor), because that is what the prior should be matched *to*; and the residual
++    is charged where it is not (`prior_conf * (1 - render_conf)`), because that is where
++    the prior has something to add. One weight for both would let the pixels the render
++    gets wrong pull the alignment, and then charge for that same error.
++
++    Returns a 0-d tensor; 0.0 when the mask has too few pixels to fit two parameters.
++    """
++    d_render = rendered_depth[mask]
++    d_prior = prior_depth[mask]
++    conf = prior_conf[mask]
++    if d_render.numel() < 2:
++        return torch.zeros((), device=rendered_depth.device)
++
++    if render_conf is None:
++        fit_weight, loss_weight = conf, conf
++    else:
++        r = render_conf[mask].clamp(0.0, 1.0).detach()
++        fit_weight = conf * (r + _RENDER_CONF_FIT_FLOOR)
++        loss_weight = conf * (1.0 - r)
++
++    sqrt_w = torch.sqrt(fit_weight)
++    A = torch.stack((sqrt_w * d_render, sqrt_w), dim=1)
++    B = sqrt_w * d_prior
++    # lstsq's own backward is both unnecessary and numerically unpleasant here - the fit
++    # is a per-view nuisance parameter, not something to differentiate through.
++    h = torch.linalg.lstsq(A, B).solution.detach()
++    aligned = h[0] * d_render + h[1]
++    return torch.mean(loss_weight * (aligned - d_prior) ** 2)

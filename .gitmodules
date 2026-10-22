@@ -1,0 +1,7 @@
+[submodule "third_party/Metric3D"]
+	path = third_party/Metric3D
+	url = https://github.com/YvanYin/Metric3D.git
+[submodule "third_party/FastGS"]
+	path = third_party/FastGS
+	url = https://github.com/fastgs/FastGS.git
+	branch = fast-pgsr

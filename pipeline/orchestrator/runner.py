@@ -1,0 +1,173 @@
+"""Runs a full pipeline from a YAML config: `python -m pipeline.orchestrator.runner \
+    --config pipeline/orchestrator/configs/photo_pipeline.yaml --input <photo_dir>`.
+
+The YAML's `stages` list is the *only* source of ordering/wiring - nothing here is
+hardcoded to a particular sequence, so a config can declare a different stage list
+without touching this file.
+
+Each stage entry:
+    id: <str>                      # also used for the "NN_<id>" run directory name
+    module: <dotted.module.path>   # must expose run(input_dirs, output_dir, params) -> StageManifest
+    uses_source_input: <bool>      # if true, gets the CLI --input path as input_dirs["source"]
+    inputs: {name: stage_id, ...}  # name -> resolved to that earlier stage's output dir
+    params: {...}                  # passed straight through to the stage's core Config
+
+`--text` is a special case: the SAM3 prompt names whatever object this capture
+contains, so it is a CLI argument rather than a YAML param. It is the `text_prompt` of
+every masking stage that does not set its own (a pipeline may segment several times).
+A masking stage with neither is skipped, for a capture with no background to strip.
+
+`--lambda-depth-prior` is the other run-level argument: the weight of the monocular depth
+prior, injected into the `geometry_prior` stage (which only does anything when it is
+positive) and into `surface_recon` (which only computes the loss term when it is). Left out,
+each stage uses its own `lambda_depth_prior` param, and a stage without one defaults to 0 -
+no prior, no Metric3D inference, no extra loss term.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+
+from pipeline.schemas.manifest import read_manifest
+from pipeline.stages._common import compute_input_hashes
+
+# Stages running this module get the CLI --text prompt unless they set their own (see
+# the module docstring).
+_MASKING_MODULES = ("pipeline.stages.masking.run",)
+
+# Stages that take the run's depth prior weight (see the module docstring).
+_DEPTH_PRIOR_MODULES = (
+    "pipeline.stages.geometry_prior.run",
+    "pipeline.stages.surface_recon_fastpgsr.run",
+)
+
+
+def _with_cli_params(module: str, params: dict, lambda_depth_prior: float | None) -> dict:
+    """`params` with the run-level CLI values that apply to `module` laid over them. The
+    CLI wins over the YAML, as `--text` does for the masking stages."""
+    if lambda_depth_prior is not None and module in _DEPTH_PRIOR_MODULES:
+        return {**params, "lambda_depth_prior": lambda_depth_prior}
+    return params
+
+
+def run_pipeline(
+    config_path: Path,
+    source_input: Path,
+    runs_dir: Path,
+    run_id: str | None,
+    force: bool,
+    until_stage: str | None,
+    text_prompt: str | None = None,
+    lambda_depth_prior: float | None = None,
+) -> Path:
+    start_time = time.time()
+    config = yaml.safe_load(config_path.read_text())
+    stages = config["stages"]
+
+    run_id = run_id or f"{config.get('run_id_prefix', 'run')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run directory: {run_dir}")
+
+    stage_dirs: dict[str, Path] = {}
+    skipped_masking: set[str] = set()
+    for i, stage_cfg in enumerate(stages):
+        stage_id = stage_cfg["id"]
+        stage_dir = run_dir / f"{i + 1:02d}_{stage_id}"
+        params = _with_cli_params(stage_cfg["module"], stage_cfg.get("params", {}), lambda_depth_prior)
+        if stage_cfg["module"] in _MASKING_MODULES:
+            # SAM3 needs a text prompt to segment anything, and there is no sensible
+            # default for "what is the object in this capture". No --text therefore
+            # means "this capture doesn't need segmenting" - one with no background to
+            # strip. The stage is skipped rather than run with an empty prompt.
+            prompt = params.get("text_prompt") or text_prompt
+            if not prompt:
+                print(f"[{i + 1:02d}/{len(stages)}] {stage_id}: skipped (no --text prompt given)")
+                skipped_masking.add(stage_id)
+                continue
+            params = {**params, "text_prompt": prompt}
+
+        input_dirs: dict[str, Path] = {}
+        if stage_cfg.get("uses_source_input"):
+            input_dirs["source"] = source_input
+        for name, ref_stage_id in stage_cfg.get("inputs", {}).items():
+            if ref_stage_id not in stage_dirs:
+                raise ValueError(
+                    f"Stage '{stage_id}' references input from '{ref_stage_id}', which hasn't run yet "
+                    f"(check stage ordering in {config_path}"
+                    + (", or was skipped - see the masking note above)" if ref_stage_id in skipped_masking else ")")
+                )
+            input_dirs[name] = stage_dirs[ref_stage_id]
+
+        if not force and _is_cached(stage_dir, params, input_dirs):
+            print(f"[{i + 1:02d}/{len(stages)}] {stage_id}: cached, skipping")
+        else:
+            print(f"[{i + 1:02d}/{len(stages)}] {stage_id}: running ({stage_cfg['module']})...")
+            module = importlib.import_module(stage_cfg["module"])
+            t0 = time.time()
+            module.run(input_dirs=input_dirs, output_dir=stage_dir, params=params)
+            print(f"[{i + 1:02d}/{len(stages)}] {stage_id}: done in {time.time() - t0:.1f}s")
+
+        stage_dirs[stage_id] = stage_dir
+        if until_stage == stage_id:
+            print(f"Stopping after '{stage_id}' (--until).")
+            break
+
+    print(f"total pipeline: done in {time.time() - start_time:.1f}s")
+    return run_dir
+
+
+def _is_cached(stage_dir: Path, params: dict, input_dirs: dict[str, Path]) -> bool:
+    manifest = read_manifest(stage_dir)
+    if manifest is None:
+        return False
+    return manifest.matches_inputs(params, compute_input_hashes(input_dirs))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--input", required=True, type=Path, help="the run's source: a photo or scene directory")
+    parser.add_argument("--runs-dir", default=Path("data/runs"), type=Path)
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--force", action="store_true", help="ignore cached manifests, rerun every stage")
+    parser.add_argument("--until", default=None, metavar="STAGE_ID", help="stop after this stage id")
+    parser.add_argument(
+        "--text", default=None, metavar="PROMPT",
+        help="object to segment, e.g. --text apple (the text_prompt of every masking stage that sets none). "
+        "Omit it to skip masking entirely - for a capture with no background to strip.",
+    )
+    parser.add_argument(
+        "--lambda-depth-prior", type=float, default=None, metavar="W",
+        help="weight of the monocular depth prior. W > 0 runs the geometry_prior stage and adds the term "
+        "to surface_recon's loss; 0 (the default when this is omitted and the config sets nothing) runs "
+        "neither. Overrides params.lambda_depth_prior on those stages.",
+    )
+    args = parser.parse_args()
+    if args.lambda_depth_prior is not None and args.lambda_depth_prior < 0:
+        parser.error("--lambda-depth-prior must be >= 0")
+
+    if not args.input.exists():
+        print(f"Input path does not exist: {args.input}", file=sys.stderr)
+        raise SystemExit(1)
+    run_pipeline(
+        config_path=args.config,
+        source_input=args.input,
+        runs_dir=args.runs_dir,
+        run_id=args.run_id,
+        force=args.force,
+        until_stage=args.until,
+        text_prompt=args.text,
+        lambda_depth_prior=args.lambda_depth_prior,
+    )
+
+
+if __name__ == "__main__":
+    main()

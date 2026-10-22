@@ -1,0 +1,53 @@
+[project]
+name = "sh-texture-pipeline"
+version = "0.1.0"
+description = "Multi-view photo -> height map + SH texture map reconstruction pipeline"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "opencv-python-headless>=4.9",
+  "pillow>=10.2",
+  "pydantic>=2.6",
+  "pyyaml>=6.0",
+  "trimesh>=4.2",
+  "open3d>=0.18",
+  "pymeshlab>=2023.12",
+  "xatlas>=0.0.9",
+  "rtree>=1.2",           # spatial index backend used by trimesh raycasting fallback
+  "embreex>=4.4",         # accelerated BVH ray casting for baking.py - without this,
+                          # trimesh falls back to a pure-numpy ray intersector whose
+                          # broad-phase barely prunes candidates on dense/curved meshes,
+                          # causing multi-GB allocations per ray batch (see baking.py)
+  "torch>=2.5",           # CG texel reconstruction + AtA/Atb SH solve in slf_fit.py
+  "moderngl>=5.10",       # GPU (OpenGL) mesh rasterization in camera_raster.py, headless
+                          # standalone context - no display server needed
+]
+
+[project.optional-dependencies]
+# Heavy / hardware-specific deps kept separate so the rest of the scaffold
+# can be installed and unit-tested without a GPU or large downloads.
+masking = [
+  "torchvision>=0.20",
+  # NOTE: sam3 pins numpy<2 (this project's base numpy>=1.26 has no upper
+  # bound) - pip's resolver may try to downgrade numpy on install; verify
+  # `python -c "import numpy, open3d"` still works afterward, or install
+  # with `--no-deps` and keep this project's numpy>=2 if it doesn't.
+  # Checkpoint is Hugging Face-gated (facebook/sam3) - request access +
+  # `huggingface-cli login` once, or pass masking.checkpoint_path to a local file.
+  "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+]
+viewer = [
+  "pygame>=2.5",           # viewers/ only - interactive windowing (moderngl is a core dep)
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]

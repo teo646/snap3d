@@ -1,0 +1,22 @@
+# Conda env for this project: GPU-enabled COLMAP + Python 3.12.
+#
+#   conda env create -f environment.yml
+#   conda activate sh-texture
+#   pip install -e ".[dev]"        # numpy/opencv/open3d/pymeshlab/xatlas/trimesh/pytest
+#   pip install -e ".[masking]"    # + torch/torchvision/SAM3 (heavy, needs a GPU to be useful)
+#
+# Why the exact build strings: conda-forge's `colmap` package doesn't declare
+# `libfaiss`/`openimageio` as hard runtime dependencies even though the binary
+# is linked against them, so a plain `colmap` install can silently produce a
+# binary that fails with "error while loading shared libraries". Pinning the
+# exact builds below is the known-working combination (verified against this
+# machine's driver/CUDA 13.0 + RTX 50-series GPU).
+name: sh-texture
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - colmap=4.0.4=cuda_129hb658b90_2
+  - libfaiss=1.10.0=cuda129_openblas_hd5b4706_200
+  - openimageio=3.1.14.1=h3b81b02_2
+  - pip

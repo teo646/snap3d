@@ -1,0 +1,48 @@
+diff --git a/hubconf.py b/hubconf.py
+index a775f2c..b69f54f 100644
+--- a/hubconf.py
++++ b/hubconf.py
+@@ -4,7 +4,7 @@ import os
+ import torch
+ try:
+   from mmcv.utils import Config, DictAction
+-except:
++except ImportError:
+   from mmengine import Config, DictAction
+ 
+ from mono.model.monodepth_model import get_configured_monodepth_model
+diff --git a/mono/utils/comm.py b/mono/utils/comm.py
+index 939e4e1..000e76c 100644
+--- a/mono/utils/comm.py
++++ b/mono/utils/comm.py
+@@ -5,11 +5,27 @@ from .avg_meter import AverageMeter
+ from collections import defaultdict, OrderedDict
+ import os
+ import socket
+-from mmcv.utils import collect_env as collect_base_env
++# mmcv is imported here for two environment-reporting helpers and nothing else -
++# collect_env and get_git_hash, neither of which affects inference. mmcv 2.x moved both
++# into mmengine anyway, and mmcv itself ships compiled CUDA ops whose prebuilt wheels
++# trail far behind this machine's torch/CUDA, so it is not worth installing for a
++# diagnostic. mmengine first, with a no-op fallback so neither is a hard dependency.
++try:
++    from mmcv.utils import collect_env as collect_base_env
++except ImportError:
++    try:
++        from mmengine.utils.dl_utils import collect_env as collect_base_env
++    except ImportError:
++        def collect_base_env():
++            return {}
+ try:
+     from mmcv.utils import get_git_hash
+-except:
+-    from mmengine.utils import get_git_hash
++except ImportError:
++    try:
++        from mmengine.utils import get_git_hash
++    except ImportError:
++        def get_git_hash(*args, **kwargs):
++            return 'unknown'
+ #import mono.mmseg as mmseg
+ # import mmseg
+ import time
