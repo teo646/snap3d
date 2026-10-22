@@ -61,10 +61,8 @@ def build_dataset(image_source_dir: Path, sparse_dense_dir: Path, dataset_dir: P
     symlink_sparse_model(sparse_dense_dir, dataset_dir)
 
 
-def build_masked_render_dataset(
-    dense_dir: Path, masks_dir: Path, dataset_dir: Path, mask_dilation_px: int
-) -> None:
-    """Same layout as `build_dataset`, but each image carries its (dilated) mask as an alpha
+def build_masked_render_dataset(dense_dir: Path, masks_dir: Path, dataset_dir: Path) -> None:
+    """Same layout as `build_dataset`, but each image carries its mask as an alpha
     channel, which the reader populates `Camera.mask` from; TSDF fusion uses it to zero background depth.
 
     `masks_dir` is masking's per-view output, `<image relative path>.png`; masks are resized
@@ -74,11 +72,6 @@ def build_masked_render_dataset(
     images_dir = dataset_dir / "images"
     images_dir.mkdir(exist_ok=True)
     dense_images_dir = dense_dir / "images"
-
-    kernel = None
-    if mask_dilation_px > 0:
-        size = 2 * mask_dilation_px + 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
     seen: set[str] = set()
     for src in sorted(dense_images_dir.rglob("*")):
@@ -100,8 +93,6 @@ def build_masked_render_dataset(
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         if mask.shape[::-1] != rgb.size:
             mask = cv2.resize(mask, rgb.size, interpolation=cv2.INTER_NEAREST)
-        if kernel is not None:
-            mask = cv2.dilate(mask, kernel)
         alpha = Image.fromarray(mask, mode="L")
         Image.merge("RGBA", (*rgb.split(), alpha)).save(dest, format="PNG")
 

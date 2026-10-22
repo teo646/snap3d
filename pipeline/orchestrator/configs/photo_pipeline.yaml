@@ -43,21 +43,20 @@ stages:
       images_subdir: _workspace/dense/images
       # Also write a masked-background `images/` folder for surface_recon to train on.
       write_masked_images: true
-      # Margin kept around the SAM3 silhouette before the cut.
-      mask_dilation_px: 0
-      mask_fill_color: [0, 0, 0]
+      # Pixels the SAM3 silhouette is grown by, in the masks and the cut images.
+      mask_dilation_px: 2
 
   - id: surface_recon
     module: pipeline.stages.surface_recon_fastpgsr.run
     inputs:
-      dataset: resize_dataset
-      masking: masking
+      poses: resize_dataset   # cameras, sparse points, original images
+      masked_images: masking  # images/: background-cut training images
+      masks: masking          # masks/: alpha for the TSDF render dataset
     params:
       iterations: 30000
       max_depth: 8.0
       voxel_size: 0.002
       use_depth_filter: true
-      mask_dilation_px: 1
       # FastGS parameters (upstream's run_tnt.py values).
       ncc_scale: 0.5
       opacity_cull_threshold: 0.05
@@ -76,7 +75,7 @@ stages:
       mesh: surface_recon
     params:
       # PyMeshLab maxholesize in boundary edges; 0 = pass-through.
-      max_hole_size: 500
+      max_hole_size: 5000
 
   - id: decimation
     module: pipeline.stages.decimation.run
@@ -99,7 +98,7 @@ stages:
       highpoly_mesh: hole_close
       uv_mesh: uv_unwrap
     params:
-      gutter_texels: 1  # must equal uv_unwrap's
+      gutter_texels: 1  # must equal uv_unwrap's margin_texels / 2
 
   - id: slf
     module: pipeline.stages.slf.run

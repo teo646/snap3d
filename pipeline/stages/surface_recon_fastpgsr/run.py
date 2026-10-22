@@ -22,8 +22,8 @@ def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -
     t0 = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    dense_dir = input_dirs["dataset"] / "_workspace" / "dense"
-    masked_images_dir = input_dirs["masking"] / "images"
+    dense_dir = input_dirs["poses"] / "_workspace" / "dense"
+    masked_images_dir = input_dirs["masked_images"] / "images"
     if not masked_images_dir.exists():
         raise RuntimeError(
             f"Expected masking's masked training images at {masked_images_dir} - give masking "
@@ -33,12 +33,12 @@ def run(input_dirs: dict[str, Path], output_dir: Path, params: dict[str, Any]) -
     build_dataset(masked_images_dir, dense_dir, dataset_dir)
     nest_sparse_model(dataset_dir)
 
-    masks_dir = input_dirs["masking"] / "masks"
+    masks_dir = input_dirs["masks"] / "masks"
     if not masks_dir.exists():
         raise RuntimeError(f"Expected masking's per-view masks at {masks_dir}")
     config = FastPGSRConfig(**params)
     masked_render_dataset_dir = output_dir / "_fastpgsr_dataset_masked_render"
-    build_masked_render_dataset(dense_dir, masks_dir, masked_render_dataset_dir, config.mask_dilation_px)
+    build_masked_render_dataset(dense_dir, masks_dir, masked_render_dataset_dir)
     nest_sparse_model(masked_render_dataset_dir)
 
     mesh_path = run_fastpgsr_surface_recon(

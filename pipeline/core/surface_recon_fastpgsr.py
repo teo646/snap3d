@@ -42,9 +42,6 @@ class FastPGSRConfig:
     # Where FastGS keeps every training view's image, gray copy and mask. "cuda" is faster;
     # "cpu" frees GPU memory when the view count times the frame size does not fit.
     data_device: str = "cuda"
-    # Read by the stage wrapper: dilates the per-view masks before compositing them into the
-    # render dataset's alpha.
-    mask_dilation_px: int = 1
     extra_train_args: list[str] = field(default_factory=list)
 
 

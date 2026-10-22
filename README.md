@@ -13,14 +13,36 @@ cd snap3d
 ./setup.sh                 # conda 환경 snap3d, fastgs 생성 + CUDA 확장 빌드
 conda activate snap3d
 hf auth login              # SAM3 접근 권한 필요 (huggingface.co/facebook/sam3)
-
-python -m pipeline.orchestrator.runner \
-    --config pipeline/orchestrator/configs/photo_pipeline.yaml \
-    --input /path/to/photos \
-    --text "물체를 설명하는 영어 단어"
 ```
 
-결과는 `data/runs/<run_id>/`에 단계별 폴더로 쌓이고, 최종 번들은 `13_export/`에 생깁니다.
+### 예제 (Quick start)
+
+`data/example/statue`에 동상 사진 55장이 들어 있습니다.
+
+```bash
+python -m pipeline.orchestrator.runner \
+    --config pipeline/orchestrator/configs/photo_pipeline.yaml \
+    --input data/example/statue \
+    --text statue \
+    --run-id example_statue
+```
+
+자신의 사진은 `--input`에 사진 폴더를, `--text`에 물체를 설명하는 영어 단어를 주면 됩니다.
+결과는 `data/runs/<run_id>/`에 단계별 폴더로 쌓입니다.
+
+### 결과 보기
+
+최종 번들은 `data/runs/<run_id>/<NN>_export/<run_id>_unorm8.snap3d`(작은 용량)와 `..._float16.snap3d`(높은 정밀도)입니다.
+`view_bundle.py`는 번들의 파일만 읽어 렌더링합니다.
+
+```bash
+pip install -e ".[viewer]"   # setup.sh로 설치했다면 이미 설치되어 있습니다
+python viewers/view_bundle.py data/runs/example_statue/*_export/example_statue_unorm8.snap3d
+```
+
+- 조작: 왼쪽 드래그 회전, 휠 확대/축소, WASD/방향키 이동, Q/E 위쪽 축 기울이기, R 시점 초기화, ESC 종료
+- 경로에는 `.snap3d` 폴더나 그 상위 `export` 폴더 모두 쓸 수 있습니다.
+- `--modify_initial_cam`을 주면 종료할 때의 시점이 번들의 `config.json`에 시작 시점으로 저장됩니다.
 
 ## 파이프라인
 

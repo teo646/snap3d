@@ -220,6 +220,7 @@ __marimo__/
 # Everything under data/ is either an input dataset that is fetched
 /data/*
 !/data/.gitkeep
+!/data/example/
 
 # Downloaded model weights (SAM3, PGSR, ...) - large binaries, fetch separately.
 /checkpoints/*

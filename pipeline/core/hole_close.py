@@ -22,7 +22,7 @@ __all__ = ["HoleCloseConfig", "run_hole_close"]
 @dataclass
 class HoleCloseConfig:
     # In boundary edges (PyMeshLab's `maxholesize`). 0 makes this stage a pass-through.
-    max_hole_size: int = 500
+    max_hole_size: int = 5000
 
 
 def run_hole_close(mesh: Mesh, config: HoleCloseConfig | None = None) -> Mesh:
