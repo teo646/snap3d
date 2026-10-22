@@ -1,4 +1,4 @@
-"""Internal helpers shared by photo_sfm.py and resize_dataset.py: run the `colmap`
+"""Internal helpers shared by ingest.py and resize_dataset.py: run the `colmap`
 CLI as a subprocess and parse its TXT model format. Not a public core module on its
 own - both wrap COLMAP but produce different schema outputs (posed_images vs.
 undistorted images + camera model), so the shared plumbing lives here.
