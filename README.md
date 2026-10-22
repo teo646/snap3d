@@ -102,3 +102,17 @@ photos - SfM - masking - surface recon - hole closing - simplification - UV unwr
 | baking | High-res -> low-res height map | Ray casting |
 | slf | Per-texel SH coefficient fit | Conjugate gradient + normal equations |
 | export | Render bundle `mesh.glb`, `sh.ktx2`, `height.ktx2` | glTF / KTX2 |
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE). It does not cover
+`third_party/`, and the pipeline depends on components with their own terms:
+
+- **FastGS / PGSR / Gaussian Splatting** (`third_party/FastGS`, and our changes to it in `third_party/patches/FastGS.patch`):
+  non-commercial research use only, and modifications must be open source. The patch is a derivative of that code and stays under
+  those licenses (see the `LICENSE.md` files in the submodule). **Running the pipeline therefore means using it for non-commercial purposes**;
+  for commercial use contact the upstream authors. Please also cite the upstream projects ([FastGS](https://github.com/fastgs/FastGS), [PGSR](https://github.com/zju3dv/PGSR), [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)).
+- **SAM 3** (`facebook/sam3`): used under Meta's [SAM License](https://huggingface.co/facebook/sam3); the model is downloaded by you and is not redistributed here.
+  Acknowledge its use in any publication of results.
+- **PyMeshLab** is GPL-3.0 (used in `decimation` and `hole_close`) and **pygame** is LGPL. They are installed as dependencies, not bundled; if you redistribute this code together with them, their terms apply.
+- Other dependencies (COLMAP, PyTorch, Open3D, trimesh, xatlas, ...) use permissive licenses (BSD/MIT/Apache).

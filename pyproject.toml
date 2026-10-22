@@ -3,6 +3,7 @@ name = "sh-texture-pipeline"
 version = "0.1.0"
 description = "Multi-view photo -> height map + SH texture map reconstruction pipeline"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "numpy>=1.26",
