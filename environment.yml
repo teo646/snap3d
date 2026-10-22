@@ -2,7 +2,7 @@
 # by hand:
 #
 #   conda env create -f environment.yml
-#   conda activate sh-texture
+#   conda activate snap3d
 #   pip install -e ".[all]"        # the pipeline + SAM3, Metric3D's deps and the viewers' pygame
 #
 # Why the exact build strings: conda-forge's `colmap` package doesn't declare
@@ -11,7 +11,7 @@
 # binary that fails with "error while loading shared libraries". Pinning the
 # exact builds below is the known-working combination (verified against this
 # machine's driver/CUDA 13.0 + RTX 50-series GPU).
-name: sh-texture
+name: snap3d
 channels:
   - conda-forge
 dependencies:

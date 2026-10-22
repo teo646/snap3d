@@ -10,8 +10,8 @@
 ```bash
 git clone --recursive https://github.com/teo646/snap3d.git
 cd snap3d
-./setup.sh                 # conda 환경 sh-texture, fastgs 생성 + CUDA 확장 빌드
-conda activate sh-texture
+./setup.sh                 # conda 환경 snap3d, fastgs 생성 + CUDA 확장 빌드
+conda activate snap3d
 hf auth login              # SAM3 접근 권한 필요 (huggingface.co/facebook/sam3)
 
 python -m pipeline.orchestrator.runner \

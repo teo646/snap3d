@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MAIN_ENV=sh-texture
+MAIN_ENV=snap3d
 FASTGS_ENV=fastgs
 SKIP_FASTGS=0
 [ "${1:-}" = "--skip-fastgs" ] && SKIP_FASTGS=1
