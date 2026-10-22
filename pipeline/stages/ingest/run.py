@@ -6,8 +6,7 @@ posed_images schema and nothing else.
 
 An optional `feature_masks` input (photo mode only) is a `masking` stage's output, whose
 `masks/` is COLMAP's `--ImageReader.mask_path`, restricting SfM to the pixels those masks
-keep. It is wired by photo_pipeline_moving_object.yaml; see that config for why a capture
-of a moving object needs it.
+keep. No shipped config wires it.
 """
 
 from __future__ import annotations

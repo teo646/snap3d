@@ -54,8 +54,7 @@ def run_photo_sfm(
     `feature_mask_dir`: optional `--ImageReader.mask_path` - a directory of
     `<image name>.png` masks (0 = ignore) restricting where keypoints are detected.
     Given one, the reconstruction is solved from those pixels alone, which is what puts
-    the resulting poses in the *object's* frame rather than the scene's: see
-    photo_pipeline_moving_object.yaml. The undistorted images this returns are still
+    the resulting poses in the *object's* frame rather than the scene's. The undistorted images this returns are still
     whole frames - only feature detection was masked.
     `workspace_dir`: scratch + output directory. On success it contains:
         database.db          - COLMAP feature/match database
