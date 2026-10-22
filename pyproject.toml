@@ -26,6 +26,7 @@ dependencies = [
 # can be installed and unit-tested without a GPU or large downloads.
 masking = [
   "torchvision>=0.20",
+  "setuptools<81",         # sam3 imports pkg_resources, which setuptools 81+ no longer ships
   # sam3 pins numpy<2. The checkpoint is Hugging Face-gated (facebook/sam3): `hf auth login`.
   "sam3 @ git+https://github.com/facebookresearch/sam3.git",
 ]
