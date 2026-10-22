@@ -8,8 +8,7 @@ Each stage entry in the YAML's `stages` list:
     inputs: {name: stage_id, ...}  # name -> that earlier stage's output dir
     params: {...}                  # passed through to the stage's core Config
 
-`--text` is the SAM3 prompt, used as the `text_prompt` of every masking stage that sets none. A
-masking stage with neither is skipped.
+`--text` (required) is the SAM3 prompt, used as the `text_prompt` of every masking stage that sets none.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ def run_pipeline(
     run_id: str | None,
     force: bool,
     until_stage: str | None,
-    text_prompt: str | None = None,
+    text_prompt: str,
 ) -> Path:
     start_time = time.time()
     config = yaml.safe_load(config_path.read_text())
@@ -49,19 +48,12 @@ def run_pipeline(
     print(f"Run directory: {run_dir}")
 
     stage_dirs: dict[str, Path] = {}
-    skipped_masking: set[str] = set()
     for i, stage_cfg in enumerate(stages):
         stage_id = stage_cfg["id"]
         stage_dir = run_dir / f"{i + 1:02d}_{stage_id}"
         params = stage_cfg.get("params", {})
         if stage_cfg["module"] in _MASKING_MODULES:
-            # No prompt means the capture needs no segmenting; skip the stage.
-            prompt = params.get("text_prompt") or text_prompt
-            if not prompt:
-                print(f"[{i + 1:02d}/{len(stages)}] {stage_id}: skipped (no --text prompt given)")
-                skipped_masking.add(stage_id)
-                continue
-            params = {**params, "text_prompt": prompt}
+            params = {**params, "text_prompt": params.get("text_prompt") or text_prompt}
 
         input_dirs: dict[str, Path] = {}
         if stage_cfg.get("uses_source_input"):
@@ -70,8 +62,7 @@ def run_pipeline(
             if ref_stage_id not in stage_dirs:
                 raise ValueError(
                     f"Stage '{stage_id}' references input from '{ref_stage_id}', which hasn't run yet "
-                    f"(check stage ordering in {config_path}"
-                    + (", or was skipped - see the masking note above)" if ref_stage_id in skipped_masking else ")")
+                    f"(check stage ordering in {config_path})"
                 )
             input_dirs[name] = stage_dirs[ref_stage_id]
 
@@ -109,9 +100,8 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="ignore cached manifests, rerun every stage")
     parser.add_argument("--until", default=None, metavar="STAGE_ID", help="stop after this stage id")
     parser.add_argument(
-        "--text", default=None, metavar="PROMPT",
-        help="object to segment, e.g. --text apple (the text_prompt of every masking stage that sets none). "
-        "Omit it to skip masking entirely - for a capture with no background to strip.",
+        "--text", required=True, metavar="PROMPT",
+        help="object to segment, e.g. --text apple (the text_prompt of every masking stage that sets none)",
     )
     args = parser.parse_args()
 

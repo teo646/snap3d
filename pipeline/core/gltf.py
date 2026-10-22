@@ -60,7 +60,7 @@ def write_glb(
         buffer += _pad4(payload)
 
     gltf = {
-        "asset": {"version": "2.0", "generator": "3d_recon_sh_texture export"},
+        "asset": {"version": "2.0", "generator": "snap3d export"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0, "name": name}],

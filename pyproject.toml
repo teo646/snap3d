@@ -36,9 +36,6 @@ masking = [
 viewer = [
   "pygame>=2.5",           # viewers/ only - interactive windowing (moderngl is a core dep)
 ]
-dev = [
-  "pytest>=8.0",
-]
 all = ["snap3d[masking,viewer]"]
 
 [build-system]

@@ -35,7 +35,7 @@ _KHR_DF_CHANNELS = {1: (0,), 2: (0, 1), 4: (0, 1, 2, 15)}
 _FLOAT_SAMPLE_LOWER = 0xBF800000  # -1.0f, the spec's convention for float channels
 _FLOAT_SAMPLE_UPPER = 0x3F800000  # +1.0f
 
-_WRITER = "3d_recon_sh_texture export"
+_WRITER = "snap3d export"
 
 
 def _basic_dfd(channels: int, unorm8: bool = False) -> bytes:
