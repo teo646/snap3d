@@ -1,23 +1,30 @@
 # snap3d
 
-여러 장의 사진에서 3D 물체를 만들어, 웹(WebGL)에서 바로 렌더링할 수 있는 mesh + SH 텍스처로 내보내는 파이프라인입니다.
-가우시안 스플래팅 기반 표면 복원(Fast-PGSR)으로 메시를 만들고, 약 5만 면으로 단순화해 UV를 펼칩니다.
-텍셀마다 구면조화(SH) 계수를 피팅해 보는 방향에 따라 달라지는 색(하이라이트, 반사)을 저장합니다.
-결과는 저폴리 메시와 텍스처 두 장이라서 신경망 없이 셰이더만으로 렌더링할 수 있습니다.
+A pipeline that turns photos of an object into a mesh + SH texture that renders directly on the web (WebGL).
+It reconstructs a mesh with Gaussian-splatting-based surface reconstruction (Fast-PGSR), simplifies it to about 50k faces and unwraps its UVs.
+For every texel it fits spherical-harmonics (SH) coefficients, so view-dependent color (highlights, reflections) is stored in the texture.
+The result is a low-poly mesh plus two textures, so it can be rendered with shaders alone, without a neural network.
 
-## 실행
+## Requirements
+
+- **An NVIDIA GPU with a recent driver** (`nvidia-smi` must work). The surface reconstruction step uses CUDA kernels.
+- **Linux** (tested on Ubuntu). Windows is untested; WSL2 with an NVIDIA GPU may work. macOS is not supported (no CUDA).
+- `conda` and `git`.
+- A Hugging Face account with access to the gated [facebook/sam3](https://huggingface.co/facebook/sam3) checkpoint.
+
+## Run
 
 ```bash
 git clone --recursive https://github.com/teo646/snap3d.git
 cd snap3d
-./setup.sh                 # conda 환경 snap3d, fastgs 생성 + CUDA 확장 빌드
+./setup.sh                 # creates the conda envs snap3d and fastgs + builds the CUDA extensions
 conda activate snap3d
-hf auth login              # SAM3 접근 권한 필요 (huggingface.co/facebook/sam3)
+hf auth login              # SAM3 access is required (huggingface.co/facebook/sam3)
 ```
 
-### 예제 (Quick start)
+### Quick start
 
-`data/example/statue`에 동상 사진 55장이 들어 있습니다.
+`data/example/statue` contains 55 photos of a statue.
 
 ```bash
 python -m pipeline.orchestrator.runner \
@@ -27,37 +34,37 @@ python -m pipeline.orchestrator.runner \
     --run-id example_statue
 ```
 
-자신의 사진은 `--input`에 사진 폴더를, `--text`에 물체를 설명하는 영어 단어를 주면 됩니다.
-결과는 `data/runs/<run_id>/`에 단계별 폴더로 쌓입니다.
+For your own photos, pass the photo folder as `--input` and an English word describing the object as `--text`.
+Results are written to `data/runs/<run_id>/`, one folder per stage.
 
-### 결과 보기
+### Viewing the result
 
-최종 번들은 `data/runs/<run_id>/<NN>_export/<run_id>_unorm8.snap3d`(작은 용량)와 `..._float16.snap3d`(높은 정밀도)입니다.
-`view_bundle.py`는 번들의 파일만 읽어 렌더링합니다.
+The final bundles are `data/runs/<run_id>/<NN>_export/<run_id>_unorm8.snap3d` (small) and `..._float16.snap3d` (higher precision).
+`view_bundle.py` renders using only the files in the bundle.
 
 ```bash
-pip install -e ".[viewer]"   # setup.sh로 설치했다면 이미 설치되어 있습니다
+pip install -e ".[viewer]"   # already installed if you used setup.sh
 python viewers/view_bundle.py data/runs/example_statue/*_export/example_statue_unorm8.snap3d
 ```
 
-- 조작: 왼쪽 드래그 회전, 휠 확대/축소, WASD/방향키 이동, Q/E 위쪽 축 기울이기, R 시점 초기화, ESC 종료
-- 경로에는 `.snap3d` 폴더나 그 상위 `export` 폴더 모두 쓸 수 있습니다.
-- `--modify_initial_cam`을 주면 종료할 때의 시점이 번들의 `config.json`에 시작 시점으로 저장됩니다.
+- Controls: left-drag to rotate, wheel to zoom, WASD/arrow keys to move, Q/E to tilt the up axis, R to reset the view, ESC to quit
+- The path can be the `.snap3d` folder or its parent `export` folder.
+- With `--modify_initial_cam`, the camera at exit is saved as the initial view in the bundle's `config.json`.
 
-## 파이프라인
+## Pipeline
 
 ```
-사진 ─ SfM ─ 마스킹 ─ 표면 복원 ─ 구멍 메우기 ─ 단순화 ─ UV 펼치기 ─ 베이킹 ─ SLF 피팅 ─ 내보내기
+photos - SfM - masking - surface recon - hole closing - simplification - UV unwrap - baking - SLF fit - export
 ```
 
-| 단계 | 하는 일 | 사용 기술 |
+| Stage | What it does | Technology |
 |---|---|---|
-| ingest | 카메라 포즈와 sparse 점 구름 | COLMAP |
-| resize_dataset | 학습 해상도의 핀홀 이미지로 변환 | |
-| masking | 사진마다 물체 마스크 (텍스트 프롬프트) | SAM3 |
-| surface_recon | 고해상도 메시 | Fast-PGSR (가우시안 스플래팅 → TSDF 융합) |
-| hole_close, decimation | 구멍을 막고 약 5만 면으로 단순화 | PyMeshLab |
-| uv_unwrap | UV 아틀라스 | xatlas |
-| baking | 고해상도 → 저해상도 높이맵 | 레이캐스팅 |
-| slf | 텍셀마다 SH 계수 피팅 | 공액경사법 + 정규방정식 |
-| export | 렌더용 번들 `mesh.glb`, `sh.ktx2`, `height.ktx2` | glTF / KTX2 |
+| ingest | Camera poses and sparse point cloud | COLMAP |
+| resize_dataset | Converts to pinhole images at training resolution | |
+| masking | Per-photo object mask (text prompt) | SAM3 |
+| surface_recon | High-resolution mesh | Fast-PGSR (Gaussian splatting -> TSDF fusion) |
+| hole_close, decimation | Closes holes and simplifies to about 50k faces | PyMeshLab |
+| uv_unwrap | UV atlas | xatlas |
+| baking | High-res -> low-res height map | Ray casting |
+| slf | Per-texel SH coefficient fit | Conjugate gradient + normal equations |
+| export | Render bundle `mesh.glb`, `sh.ktx2`, `height.ktx2` | glTF / KTX2 |

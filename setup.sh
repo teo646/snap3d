@@ -4,7 +4,7 @@
 #   ./setup.sh              # everything
 #   ./setup.sh --skip-fastgs  # only the main environment (no surface reconstruction)
 #
-# Needs: conda, git, an NVIDIA GPU with a recent driver. Takes a while (downloads several GB and
+# Needs: Linux (Windows untested, macOS unsupported), conda, git, an NVIDIA GPU with a recent driver. Takes a while (downloads several GB and
 # compiles the FastGS CUDA extensions). Safe to re-run: finished steps are skipped or redone in place.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -19,6 +19,8 @@ die() { echo "error: $*" >&2; exit 1; }
 have_env() { conda env list | awk '{print $1}' | grep -qx "$1"; }
 in_env() { local env=$1; shift; conda run --no-capture-output -n "$env" "$@"; }
 
+[ "$(uname -s)" = Linux ] || die "snap3d needs Linux with an NVIDIA GPU (found $(uname -s)). macOS has no CUDA; on Windows (untested) try WSL2 with an NVIDIA GPU."
+command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1 || die "no working NVIDIA GPU/driver found (nvidia-smi failed). The surface reconstruction step needs CUDA."
 command -v conda >/dev/null || die "conda not found (install Miniconda/Anaconda first)"
 command -v git >/dev/null || die "git not found"
 

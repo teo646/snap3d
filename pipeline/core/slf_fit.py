@@ -33,23 +33,23 @@ TEXEL_STATUS_COLORS: dict[str, tuple[tuple[int, int, int], str]] = {
     # Values are (B, G, R) for cv2.imwrite; the legend .json reverses them to RGB.
     "background": (
         (0, 255, 255),  # -> RGB (255,255,0): yellow
-        "atlas 밖 (rasterize_uv_atlas + baking의 gutter 확장에도 포함 안 됨); 렌더에서 절대 샘플되지 않음",
+        "outside the atlas (not covered by rasterize_uv_atlas nor by baking's gutter dilation); never sampled at render time",
     ),
     "well_fit": (
         (255, 90, 40),  # -> RGB (40,90,255): blue
-        "min_observations_per_texel 이상 관측 + precision 충분히 확보 (well_conditioned); 정상적으로 SH 전체 차수 피팅됨",
+        "observed at least min_observations_per_texel times with enough precision (well_conditioned); fitted at the full SH degree",
     ),
     "under_observed": (
         (30, 30, 230),  # -> RGB (230,30,30): red
-        "관측은 됐지만 min_observations_per_texel 미만이라 degree-0 평균(DC항만)으로 대체됨",
+        "observed, but fewer than min_observations_per_texel times, so replaced by the degree-0 mean (DC term only)",
     ),
     "rejected_low_precision": (
         (0, 150, 255),  # -> RGB (255,150,0): orange
-        "관측은 있었으나 총 precision이 ridge*min_precision_ratio 미만이라 해가 ridge에 지배됨 -> 버려지고 nearest-copy로 채워짐",
+        "observed, but total precision is below ridge*min_precision_ratio so the solution is dominated by the ridge -> discarded and filled by nearest-copy",
     ),
     "never_observed": (
         (200, 40, 160),  # -> RGB (160,40,200): purple
-        "이 텍셀을 잡은 관측이 하나도 없음(코어 텍셀이면 마스크/뎁스에 전부 걸렀거나 어떤 사진도 안 봄, gutter면 흔한 경우) -> nearest-copy로 채워짐",
+        "no observation hit this texel (for a core texel: all filtered out by mask/depth, or no photo saw it; common for gutter texels) -> filled by nearest-copy",
     ),
 }
 
