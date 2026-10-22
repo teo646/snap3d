@@ -1,5 +1,10 @@
 # snap3d
 
+<p align="center">
+  <img src="docs/statue.gif" width="49%" alt="Rendered statue">
+  <img src="docs/drawing.gif" width="49%" alt="Rendered painting">
+</p>
+
 A pipeline that turns photos of an object into a mesh + SH texture that renders directly on the web (WebGL).
 It reconstructs a mesh with Gaussian-splatting-based surface reconstruction (Fast-PGSR), simplifies it to about 50k faces and unwraps its UVs.
 For every texel it fits spherical-harmonics (SH) coefficients, so view-dependent color (highlights, reflections) is stored in the texture.
@@ -50,17 +55,33 @@ Results are written to `data/runs/<run_id>/`, one folder per stage.
 
 ### 5. Viewing the result
 
-The final bundles are `data/runs/<run_id>/<NN>_export/<run_id>_unorm8.snap3d` (small) and `..._float16.snap3d` (higher precision).
+The final bundles are `data/runs/<run_id>/11_export/<run_id>_unorm8.snap3d` (small) and `..._float16.snap3d` (higher precision).
 `view_bundle.py` renders using only the files in the bundle.
 
 ```bash
 pip install -e ".[viewer]"   # already installed if you used setup.sh
-python viewers/view_bundle.py data/runs/example_statue/*_export/example_statue_unorm8.snap3d
+python viewers/view_bundle.py data/runs/example_statue/11_export/example_statue_unorm8.snap3d
 ```
 
-- Controls: left-drag to rotate, wheel to zoom, WASD/arrow keys to move, Q/E to tilt the up axis, R to reset the view, ESC to quit
-- The path can be the `.snap3d` folder or its parent `export` folder.
-- With `--modify_initial_cam`, the camera at exit is saved as the initial view in the bundle's `config.json`.
+### 6. Putting it on the web
+
+A `.snap3d` folder is exactly what [snap3d-viewer](https://github.com/teo646/snap3d-viewer) loads, with no conversion step.
+
+1. Copy the bundle folder next to your page, e.g. `bundles/statue.snap3d`.
+2. Add a canvas and the viewer script:
+
+```html
+<canvas id="canvas" style="width:100%;height:480px"></canvas>
+<script src="https://teo646.github.io/snap3d-viewer/dist/viewer.js"></script>
+<script>
+  const viewer = new Snap3dViewer(canvas, 'bundles/statue.snap3d');
+</script>
+```
+
+3. Serve the page over HTTP (any static host, such as GitHub Pages, works). Drag to orbit, wheel to zoom, WASD or the arrow keys to pan.
+
+The viewer needs a browser with WebGL2 (Chrome 80+, Firefox 113+, Safari 16.4+).
+More examples are on the demo site: https://teo646.github.io/snap3d-multisite/
 
 ## Pipeline
 
