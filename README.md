@@ -5,24 +5,35 @@ It reconstructs a mesh with Gaussian-splatting-based surface reconstruction (Fas
 For every texel it fits spherical-harmonics (SH) coefficients, so view-dependent color (highlights, reflections) is stored in the texture.
 The result is a low-poly mesh plus two textures, so it can be rendered with shaders alone, without a neural network.
 
-## Requirements
-
-- **An NVIDIA GPU with a recent driver** (`nvidia-smi` must work). The surface reconstruction step uses CUDA kernels.
-- **Linux** (tested on Ubuntu). Windows is untested; WSL2 with an NVIDIA GPU may work. macOS is not supported (no CUDA).
-- `conda` and `git`.
-- A Hugging Face account with access to the gated [facebook/sam3](https://huggingface.co/facebook/sam3) checkpoint.
-
 ## Run
+
+### 1. Prerequisites
+
+- **Linux with an NVIDIA GPU** and a recent driver (`nvidia-smi` must work), plus `git`. Windows is untested (WSL2 with an NVIDIA GPU may work); macOS is not supported (no CUDA).
+- **conda**: install [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install).
+- **Hugging Face**: the SAM3 model is gated, so you need an account.
+  1. Create an account at [huggingface.co](https://huggingface.co/join).
+  2. Request access on the [facebook/sam3](https://huggingface.co/facebook/sam3) page and wait for approval.
+  3. Create a read-access token in the [token settings](https://huggingface.co/settings/tokens).
+
+  The `hf` command (`huggingface_hub`) is installed into the environment by `setup.sh` in step 2.
+
+### 2. Install
 
 ```bash
 git clone --recursive https://github.com/teo646/snap3d.git
 cd snap3d
-./setup.sh                 # creates the conda envs snap3d and fastgs + builds the CUDA extensions
-conda activate snap3d
-hf auth login              # SAM3 access is required (huggingface.co/facebook/sam3)
+./setup.sh                 # creates the conda envs snap3d and fastgs + builds the CUDA extensions (several GB to download, takes a while)
 ```
 
-### Quick start
+### 3. Log in
+
+```bash
+conda activate snap3d
+hf auth login              # paste the token from step 1
+```
+
+### 4. Quick start
 
 `data/example/statue` contains 55 photos of a statue.
 
@@ -37,7 +48,7 @@ python -m pipeline.orchestrator.runner \
 For your own photos, pass the photo folder as `--input` and an English word describing the object as `--text`.
 Results are written to `data/runs/<run_id>/`, one folder per stage.
 
-### Viewing the result
+### 5. Viewing the result
 
 The final bundles are `data/runs/<run_id>/<NN>_export/<run_id>_unorm8.snap3d` (small) and `..._float16.snap3d` (higher precision).
 `view_bundle.py` renders using only the files in the bundle.
