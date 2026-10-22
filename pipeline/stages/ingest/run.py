@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from pipeline.core.ingest.photo_sfm import PhotoSfMConfig, run_photo_sfm
+from pipeline.core.ingest import PhotoSfMConfig, run_photo_sfm
 from pipeline.schemas.manifest import StageManifest
 from pipeline.stages._common import finalize_stage, stage_cli
 
