@@ -26,7 +26,7 @@ say "1/4 main environment ($MAIN_ENV)"
 if have_env "$MAIN_ENV"; then
   conda env update -n "$MAIN_ENV" -f environment.yml
 else
-  conda env create -f environment.yml
+  conda env create -n "$MAIN_ENV" -f environment.yml
 fi
 in_env "$MAIN_ENV" pip install -e ".[all]"
 
@@ -41,7 +41,7 @@ else
   if have_env "$FASTGS_ENV"; then
     conda env update -n "$FASTGS_ENV" -f environment-fastgs.yml
   else
-    conda env create -f environment-fastgs.yml
+    conda env create -n "$FASTGS_ENV" -f environment-fastgs.yml
   fi
   FASTGS_PREFIX=$(conda run -n "$FASTGS_ENV" python -c 'import sys; print(sys.prefix)')
 
