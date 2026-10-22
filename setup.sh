@@ -9,8 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MAIN_ENV=snap3d
-FASTGS_ENV=fastgs
+MAIN_ENV=${SNAP3D_ENV:-snap3d}
+FASTGS_ENV=${SNAP3D_FASTGS_ENV:-fastgs}
 SKIP_FASTGS=0
 [ "${1:-}" = "--skip-fastgs" ] && SKIP_FASTGS=1
 
