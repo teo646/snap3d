@@ -5,10 +5,12 @@
   <img src="docs/drawing.gif" width="49%" alt="Rendered painting">
 </p>
 
+More demo: https://teo646.github.io/snap3d-multisite/
+
 A pipeline that turns photos of an object into a mesh + SH texture that renders directly on the web (WebGL).
 It reconstructs a mesh with Gaussian-splatting-based surface reconstruction (Fast-PGSR), simplifies it to about 50k faces and unwraps its UVs.
 For every texel it fits spherical-harmonics (SH) coefficients, so view-dependent color (highlights, reflections) is stored in the texture.
-The result is a low-poly mesh plus two textures, so it can be rendered with shaders alone, without a neural network.
+The result is a low-poly mesh plus two textures, so it can be rendered with shaders alone.
 
 ## Run
 
